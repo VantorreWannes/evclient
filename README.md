@@ -28,7 +28,7 @@
 ##### `POST /user/register`
 
 - Claims an available user.
-- If successful returns the claimed user.
+- If successful returns the claimed user ID.
 
 ##### `POST /user/register:id`
 
