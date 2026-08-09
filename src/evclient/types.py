@@ -16,6 +16,7 @@ SnapshotId = Digest
 ManifestId = Digest
 ReferenceId = Digest
 ContentId = Digest
+ArchiveId = Digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,12 +49,6 @@ class Snapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class Archive:
-    user_id: UserId
-    archive_url: AnyUrl
-
-
-@dataclass(frozen=True, slots=True)
 class Workspace:
     directory: Path
     snapshot_ids: tuple[SnapshotId, ...]
@@ -75,3 +70,13 @@ class User:
     @classmethod
     def from_id(cls, user_id: UserId) -> User:
         return User(user_id, set())
+
+
+@dataclass(frozen=True, slots=True)
+class Archive:
+    url: str
+    user_id: UserId
+
+    @property
+    def id(self) -> ArchiveId:
+        return blake3(dill.dumps((self.url, self.user_id))).hexdigest()

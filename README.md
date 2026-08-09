@@ -12,7 +12,6 @@
 - **`ev archive <archive:URL> unregister <user:ID>`:** Request to be forgotten with the passed user ID on the given archive URL.
 - **`ev <workspace:PATH> login <api:URL> <user:ID>`:** Add this api URL + user ID to the list of active archives for the specified workspace.
 - **`ev <workspace:PATH> logout <api:URL> <user:ID>`:** Remove this api URL + user ID from the list of active archives for the specified workspace.
-- **`ev <workspace:PATH> logout <api:URL> <user:ID>`:** Remove this api URL + user ID from the list of active archives for the specified workspace.
 - **`ev <workspace:PATH> save [--note <comment:TEXT> | -n <comment:TEXT>]`:** Save the current state of this workspace as a new version. With the specified comment if provided.
 - **`ev <workspace:PATH> list [--version <version:NUMBER> | -v <version:NUMBER>]`:** List every version of the passed workspace so far or just the specific one requested. With their respective notes if set.
 - **`ev <source:PATH> clone <target:PATH> [--version <version:NUMBER> | -v <version:NUMBER>]`:** Clone the source workspace to the target workspace. Target may not exist yet. Clone the workspace as it was on the specified version if passed.

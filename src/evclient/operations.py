@@ -33,3 +33,14 @@ async def call_delete_user_id(archive_url: str, user_id: UserId) -> None:
         session.delete(url) as response,
     ):
         response.raise_for_status()
+
+
+async def register_command(archive_url: str, user_id: UserId | None) -> None:
+    if user_id:
+        await call_register_user_id(archive_url, user_id)
+    else:
+        await call_register_user(archive_url)
+
+
+async def unregister_command(archive_url: str, user_id: UserId) -> None:
+    await call_delete_user_id(archive_url, user_id)
