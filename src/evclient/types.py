@@ -1,13 +1,9 @@
 import uuid
 from pathlib import Path  # noqa: TC003
-from typing import TYPE_CHECKING
 
 import dill
 from blake3 import blake3
 from pydantic.dataclasses import dataclass
-
-if TYPE_CHECKING:
-    from pydantic import AnyUrl
 
 Digest = str
 UserId = str

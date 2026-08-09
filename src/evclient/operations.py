@@ -1,10 +1,21 @@
+from typing import TYPE_CHECKING
+
 import aiohttp
 
-from evclient.types import User, UserId
+from evclient.stores import FileStore, Store
+from evclient.types import Archive, User, UserId
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 REGISTER_USER_ENDPOINT = "/user/register"
 REGISTER_USER_ID_ENDPOINT = "/user/register/{user_id}"
 DELETE_USER_ENDPOINT = "/user/{user_id}"
+ARCHIVE_STORE_FILE = ".ev"
+
+
+async def get_archive_store(workspace_path: Path) -> Store:
+    return FileStore(workspace_path / ARCHIVE_STORE_FILE)
 
 
 async def call_register_user(archive_url: str) -> User:
@@ -35,12 +46,29 @@ async def call_delete_user_id(archive_url: str, user_id: UserId) -> None:
         response.raise_for_status()
 
 
-async def register_command(archive_url: str, user_id: UserId | None) -> None:
+async def register_command(archive_url: str, user_id: UserId | None = None) -> UserId:
     if user_id:
         await call_register_user_id(archive_url, user_id)
-    else:
-        await call_register_user(archive_url)
+        return user_id
+    user = await call_register_user(archive_url)
+    return user.id
 
 
 async def unregister_command(archive_url: str, user_id: UserId) -> None:
     await call_delete_user_id(archive_url, user_id)
+
+
+async def login_command(
+    workspace_path: Path, archive_url: str, user_id: UserId
+) -> None:
+    archive = Archive(archive_url, user_id)
+    archive_store = await get_archive_store(workspace_path)
+    await archive_store.set(archive.id, archive)
+
+
+async def logout_command(
+    workspace_path: Path, archive_url: str, user_id: UserId
+) -> None:
+    archive = Archive(archive_url, user_id)
+    archive_store = await get_archive_store(workspace_path)
+    await archive_store.delete(archive.id)
