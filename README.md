@@ -2,140 +2,62 @@
 
 ### Goals
 
-- **Many Archives:** Can store in many archives at once.
-- **Emergent Complexity:** Small implementation surface but reasonable usage requirements.
+- **Many Archives:** Store in many archives at once.
+- **Emergent Complexity:** Small implementation surface with reasonable usage requirements.
 
 ## Commands
 
-- **`ev [COMMANDS | OPTIONS | ARGUMENTS | FLAGS]... [--help | -h]`:** List all sub commands + a small description of the intended usage.
-- **`ev archive <archive:URL> register [user:ID]`:** Request to claim a new user ID on the given archive URL.
-- **`ev archive <archive:URL> unregister <user:ID>`:** Request to be forgotten with the passed user ID on the given archive URL.
-- **`ev <workspace:PATH> login <api:URL> <user:ID>`:** Add this api URL + user ID to the list of active archives for the specified workspace.
-- **`ev <workspace:PATH> logout <api:URL> <user:ID>`:** Remove this api URL + user ID from the list of active archives for the specified workspace.
-- **`ev <workspace:PATH> save [--note <comment:TEXT> | -n <comment:TEXT>]`:** Save the current state of this workspace as a new version. With the specified comment if provided.
-- **`ev <workspace:PATH> list [--version <version:NUMBER> | -v <version:NUMBER>]`:** List every version of the passed workspace so far or just the specific one requested. With their respective notes if set.
-- **`ev <source:PATH> clone <target:PATH> [--version <version:NUMBER> | -v <version:NUMBER>]`:** Clone the source workspace to the target workspace. Target may not exist yet. Clone the workspace as it was on the specified version if passed.
-- **`ev <source:PATH> forget {--version <version:NUMBER> | -v <version:NUMBER> | --all | -a}`:** Request the active workspaces to forget the selected version. Or all if requested. Does not clear the current workspace state.
+All commands accept `--help` / `-h`.
+
+- **`ev archive <archive:URL> register [user:ID]`:** Claim a user ID on the archive. Archive-chosen when omitted.
+- **`ev archive <archive:URL> unregister <user:ID>`:** Forget the user and everything it stored on the archive.
+- **`ev <workspace:PATH> login <archive:URL> <user:ID>`:** Add the archive + user to the workspace's active archives.
+- **`ev <workspace:PATH> logout <archive:URL> <user:ID>`:** Remove the archive + user from the workspace's active archives.
+- **`ev <workspace:PATH> save [--note <note:TEXT> | -n <note:TEXT>]`:** Save the workspace's current state as a new version, with the note when provided.
+- **`ev <workspace:PATH> list [--version <version:NUMBER> | -v <version:NUMBER>]`:** List the workspace's versions, or only the requested one, with notes where set.
+- **`ev <source:PATH> clone <target:PATH> [--version <version:NUMBER> | -v <version:NUMBER>]`:** Clone the source workspace to the target path, which may not exist yet. Clone the given version when passed, the latest otherwise.
+- **`ev <workspace:PATH> forget {--version <version:NUMBER> | -v <version:NUMBER> | --all | -a}`:** Forget the selected version, or all versions, on every active archive. Local files stay untouched.
 
 ## Archive
 
-- **URL Specified:** Each archive only be accessed programatically by users through its URL.
+An archive is accessed only programmatically, through its URL.
 
-### Endpoints
+### Accounts
 
-#### Accounts
+- **`POST /user/register`:** Claim an archive-chosen user ID. Returns it.
+- **`POST /user/register/<user:ID>`:** Claim the given user ID.
+- **`DELETE /user/<user:ID>`:** Forget the user and everything it stored.
+- **`GET /user/<user:ID>`:** Returns an object containing the user's workspace hashes.
 
-##### `POST /user/register`
+### Objects
 
-- Claims an available user.
-- If successful returns the claimed user ID.
+Five object types, forming one chain from workspace to content:
 
-##### `POST /user/register:id`
+| Type        | Contents                                |
+| ----------- | --------------------------------------- |
+| `workspace` | An array of snapshot hashes             |
+| `snapshot`  | A manifest hash and an optional note    |
+| `manifest`  | An array of reference hashes            |
+| `reference` | A relative file path and a content hash |
+| `content`   | Raw bytes                               |
 
-- Attempts to claim the specfied user.
+Every object supports the same endpoints under `/user/<user:ID>/<type>/<hash>`:
 
-##### `DELETE /user/:user_id/`
-
-- Attempts to forget the provided user.
-
-##### `GET /user/:user_id/`
-
-- Returns an object containing:
-  - An array of all workspace IDs for the given user.
-
-#### Workspace
-
-##### `GET /user/:user_id/workspace/:workspace_id`
-
-- Returns a workspace object containing:
-  - An array of all snapshot IDs for the given user's workspace.
-
-##### `PUT /user/:user_id/workspace/:workspace_id`
-
-- Replace the user's specified workspace with the new workspace object containing:
-  - An array of all snapshot IDs for the given user's workspace.
-
-##### `DELETE /user/:user_id/workspace/:workspace_id`
-
-- Forget the user's specified workspace.
-
-#### Snapshot
-
-##### `GET /user/:user_id/snapshot/:snapshot_id`
-
-- Returns an object containing:
-  - An array of all manifest IDs for the given user's snapshot.
-  - An optional note string for the given user's snapshot.
-
-##### `PUT /user/:user_id/snapshot/:snapshot_id`
-
-- Create the user's specified snapshot from the provided snapshot object containing:
-  - A manifest IDs for the given user's snapshot.
-  - An optional note string for the given user's snapshot.
-
-##### `DELETE /user/:user_id/snapshot/:snapshot_id`
-
-- Forget the user's specified snapshot.
-
-#### Manifest
-
-##### `GET /user/:user_id/manifest/:manifest_id`
-
-- Returns an object containing:
-  - An array of all reference IDs for the given user's manifest.
-
-##### `PUT /user/:user_id/manifest/:manifest_id`
-
-- Create the user's specified manifest from the provided manifest object containing:
-  - An array of all reference IDs for the given user's manifest.
-
-##### `DELETE /user/:user_id/manifest/:manifest_id`
-
-- Forget the user's specified manifest.
-
-#### Reference
-
-##### `GET /user/:user_id/reference/:reference_id`
-
-- Returns an object containing:
-  - The reference's relative file path.
-  - The reference's content digest.
-
-##### `PUT /user/:user_id/reference/:reference_id`
-
-- Create the user's specified reference from the provided reference object containing:
-  - The reference's relative file path.
-  - The reference's content digest.
-
-##### `DELETE /user/:user_id/reference/:reference_id`
-
-- Forget the user's specified reference.
-
-#### Content
-
-##### `GET /user/:user_id/content/:content_id`
-
-- Returns a byte stream containing:
-  - The encoded content data.
-
-##### `PUT /user/:user_id/content/:content_id`
-
-- Create the user's specified reference from the provided content byte stream containing:
-  - The encoded content data.
-
-##### `DELETE /user/:user_id/content/:content_id`
-
-- Forget the user's specified reference.
+- **`HEAD`:** Check whether the archive already has the object.
+- **`GET`:** Return the object.
+- **`PUT`:** Store the object at the given hash.
+- **`DELETE`:** Forget the object at the given hash.
 
 ### Invariants
 
-- All non user IDs are blake3 hashes.
+- Every object is identified by a blake3 hash of its contents; only users have IDs.
 
 ## Client
 
 ### Invariants
 
-- All config information is stored in the `.ev` folder at the workspace root.
-- The workspace login command appends the provided archive configuration to the currently active archive configurations in `.ev/archives`.
-- If an internal error happens the program should never continue.
-- User IDs are provided and used as is by the archive. No extra mapping.
+- All configuration lives in the `.ev` folder at the workspace root.
+- `login` appends one `<archive:URL> <user:ID>` line to `.ev/archives`; `logout` removes it.
+- A version's number is its position in the workspace's snapshot array. Ordering belongs to the workspace container; no type stores an index.
+- User IDs are used exactly as provided by the archive; no client-side mapping.
+- On internal error the client aborts immediately rather than continue in a partially synced state.

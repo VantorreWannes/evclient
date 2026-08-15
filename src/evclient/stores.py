@@ -1,152 +1,79 @@
-import asyncio
-from abc import ABC, abstractmethod
-from collections.abc import Hashable
-from pathlib import Path
+import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, override
 
-import aiofiles
-import dill
-from blake3 import blake3
+from evclient.types import Digest, normalize_url
+
+LOGGER = logging.getLogger("evclient.stores")
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
 
-    from evclient.types import Digest
+    import aiohttp
+
+    from evclient.types import Archive
 
 
 class Store[K, V](Protocol):
+    """Minimal key-value contract shared by every object type."""
+
     def get(self, key: K) -> Awaitable[V]: ...
 
     def set(self, key: K, value: V) -> Awaitable[None]: ...
 
     def delete(self, key: K) -> Awaitable[None]: ...
 
-    def keys(self) -> Awaitable[tuple[K, ...]]: ...
 
-    def contains(self, key: K) -> Awaitable[bool]: ...
+@dataclass(frozen=True, slots=True)
+class ObjectStores:
+    """The five archive object types as typed store views."""
 
-    def values(self) -> Awaitable[tuple[V, ...]]: ...
-
-    def length(self) -> Awaitable[int]: ...
-
-
-class BaseStore[K, V](ABC):
-    @abstractmethod
-    def get(self, key: K) -> Awaitable[V]: ...
-
-    @abstractmethod
-    def set(self, key: K, value: V) -> Awaitable[None]: ...
-
-    @abstractmethod
-    def delete(self, key: K) -> Awaitable[None]: ...
-
-    @abstractmethod
-    def keys(self) -> Awaitable[tuple[K, ...]]: ...
-
-    async def contains(self, key: K) -> bool:
-        return key in await self.keys()
-
-    async def values(self) -> tuple[V, ...]:
-        return tuple(await asyncio.gather(*[self.get(k) for k in await self.keys()]))
-
-    async def length(self) -> int:
-        return len(await self.keys())
+    workspace: Store[Digest, bytes]
+    snapshot: Store[Digest, bytes]
+    manifest: Store[Digest, bytes]
+    reference: Store[Digest, bytes]
+    content: Store[Digest, bytes]
 
 
-class MemoryStore[K: Hashable, V](BaseStore[K, V]):
-    def __init__(self) -> None:
-        self._store: dict[K, V] = {}
+class ArchiveStore(Store[Digest, bytes]):
+    """Map the generic HEAD/GET/PUT/DELETE endpoints onto the store contract."""
+
+    def __init__(self, session: aiohttp.ClientSession, base_url: str) -> None:
+        self._session = session
+        self._base_url = base_url
+
+    def _url(self, key: Digest) -> str:
+        return f"{self._base_url}/{key}"
 
     @override
-    async def get(self, key: K) -> V:
-        return self._store[key]
+    async def get(self, key: Digest) -> bytes:
+        LOGGER.debug("GET %s", self._url(key))
+        async with self._session.get(self._url(key)) as response:
+            response.raise_for_status()
+            payload = await response.read()
+        LOGGER.debug("GET %s -> %d bytes", self._url(key), len(payload))
+        return payload
 
     @override
-    async def set(self, key: K, value: V) -> None:
-        self._store[key] = value
+    async def set(self, key: Digest, value: bytes) -> None:
+        LOGGER.debug("PUT %s (%d bytes)", self._url(key), len(value))
+        async with self._session.put(self._url(key), data=value) as response:
+            response.raise_for_status()
 
     @override
-    async def delete(self, key: K) -> None:
-        self._store.pop(key, None)
-
-    @override
-    async def keys(self) -> tuple[K, ...]:
-        return tuple(self._store.keys())
+    async def delete(self, key: Digest) -> None:
+        LOGGER.debug("DELETE %s", self._url(key))
+        async with self._session.delete(self._url(key)) as response:
+            response.raise_for_status()
 
 
-class FileStore[K: Hashable, V](BaseStore[K, V]):
-    def __init__(self, path: Path) -> None:
-        self.path = path
-
-    @classmethod
-    def load(cls, path: Path) -> dict[K, V]:
-        if path.exists():
-            return dill.loads(path.read_bytes())  # noqa: S301
-        return {}
-
-    @classmethod
-    def save(cls, path: Path, key_values: dict[K, V]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(dill.dumps(key_values))
-
-    @override
-    async def get(self, key: K) -> V:
-        key_values = FileStore[K, V].load(self.path)
-        return key_values[key]
-
-    @override
-    async def set(self, key: K, value: V) -> None:
-        key_values = FileStore[K, V].load(self.path)
-        key_values[key] = value
-        FileStore[K, V].save(self.path, key_values)
-
-    @override
-    async def delete(self, key: K) -> None:
-        key_values = FileStore[K, V].load(self.path)
-        key_values.pop(key)
-        FileStore[K, V].save(self.path, key_values)
-
-    @override
-    async def keys(self) -> tuple[K, ...]:
-        return tuple(FileStore[K, V].load(self.path).keys())
-
-
-class DirectoryStore[K, V](BaseStore[K, V]):
-    def __init__(self, directory: Path) -> None:
-        self.directory = directory
-        self.key_store = FileStore[K, Path](directory / "index.dill")
-
-    @classmethod
-    def digest(cls, key: K) -> Digest:
-        return blake3(dill.dumps(key)).hexdigest()
-
-    def filepath(self, key: K) -> Path:
-        return self.directory / self.digest(key)
-
-    @override
-    async def get(self, key: K) -> V:
-        filepath = await self.key_store.get(key)
-        async with aiofiles.open(filepath, mode="rb") as f:
-            data = await f.read()
-        return dill.loads(data)  # noqa: S301
-
-    @override
-    async def set(self, key: K, value: V) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
-        filepath = self.filepath(key)
-        await self.key_store.set(key, filepath)
-        data = dill.dumps(value)
-        async with aiofiles.open(filepath, mode="wb") as f:
-            await f.write(data)
-        await self.key_store.set(key, filepath)
-
-    @override
-    async def delete(self, key: K) -> None:
-        filepath = await self.key_store.get(key)
-        if filepath and filepath.exists():
-            filepath.unlink()
-        await self.key_store.delete(key)
-
-    @override
-    async def keys(self) -> tuple[K, ...]:
-        return await self.key_store.keys()
+def object_stores(session: aiohttp.ClientSession, archive: Archive) -> ObjectStores:
+    """Build the five typed store views for one archive account."""
+    base = f"{normalize_url(archive.url)}/user/{archive.user_id}"
+    return ObjectStores(
+        workspace=ArchiveStore(session, f"{base}/workspace"),
+        snapshot=ArchiveStore(session, f"{base}/snapshot"),
+        manifest=ArchiveStore(session, f"{base}/manifest"),
+        reference=ArchiveStore(session, f"{base}/reference"),
+        content=ArchiveStore(session, f"{base}/content"),
+    )

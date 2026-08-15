@@ -1,23 +1,20 @@
 [project]
 name = "evclient"
 version = "0.1.0"
-description = "Add your description here"
+description = "EasyVersion client: content-hashed workspace archives."
 readme = "README.md"
 authors = [
     { name = "Wannes Vantorre", email = "vantorrewannes@gmail.com" }
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "aiodns>=4.0.4",
-    "aiofiles>=25.1.0",
     "aiohttp>=3.14.3",
     "blake3>=1.0.9",
-    "dill>=0.4.1",
     "pydantic>=2.13.4",
 ]
 
 [project.scripts]
-evclient = "evclient:main"
+ev = "evclient:main"
 
 [build-system]
 requires = ["uv_build>=0.11.32,<0.12.0"]

@@ -1,8 +1,5 @@
-import uuid
-from pathlib import Path  # noqa: TC003
-
-import dill
 from blake3 import blake3
+from pydantic import TypeAdapter
 from pydantic.dataclasses import dataclass
 
 Digest = str
@@ -12,67 +9,70 @@ SnapshotId = Digest
 ManifestId = Digest
 ReferenceId = Digest
 ContentId = Digest
-ArchiveId = Digest
 
 
-@dataclass(frozen=True, slots=True)
-class Reference:
-    file_path: Path
-    content_digest: ContentId
-
-    @property
-    def id(self) -> ReferenceId:
-        return blake3(dill.dumps((self.file_path, self.content_digest))).hexdigest()
+class EvError(Exception):
+    """Raise for any user-facing failure; the client aborts immediately."""
 
 
-@dataclass(frozen=True, slots=True)
-class Manifest:
-    reference_ids: tuple[ReferenceId, ...]
-
-    @property
-    def id(self) -> ManifestId:
-        return blake3(dill.dumps(self.reference_ids)).hexdigest()
+def normalize_url(url: str) -> str:
+    """Strip trailing slashes so endpoint paths always join cleanly."""
+    return url.rstrip("/")
 
 
-@dataclass(frozen=True, slots=True)
-class Snapshot:
-    comment: str | None
-    manifest_id: ManifestId
-
-    @property
-    def id(self) -> SnapshotId:
-        return blake3(dill.dumps(self.comment, self.manifest_id)).hexdigest()
+def hash_bytes(data: bytes) -> Digest:
+    """Hash raw bytes; content is identified by the blake3 of itself."""
+    return blake3(data).hexdigest()
 
 
-@dataclass(frozen=True, slots=True)
-class Workspace:
-    directory: Path
-    snapshot_ids: tuple[SnapshotId, ...]
-
-    @property
-    def id(self) -> SnapshotId:
-        return blake3(dill.dumps(self.directory)).hexdigest()
+def encode[T](obj: T) -> bytes:
+    """Serialize an object to its canonical JSON payload."""
+    return TypeAdapter(type(obj)).dump_json(obj)
 
 
-@dataclass(frozen=True, slots=True)
-class User:
-    id: UserId
-    workspace_ids: set[WorkspaceId]
+def decode[T](model: type[T], data: bytes) -> T:
+    """Parse an archive payload back into its object type."""
+    return TypeAdapter(model).validate_json(data)
 
-    @classmethod
-    def random(cls) -> User:
-        return User(uuid.uuid4().hex, set())
 
-    @classmethod
-    def from_id(cls, user_id: UserId) -> User:
-        return User(user_id, set())
+def hash_object[T](obj: T) -> Digest:
+    """Hash an object's canonical payload: its address on the archive."""
+    return hash_bytes(encode(obj))
 
 
 @dataclass(frozen=True, slots=True)
 class Archive:
+    """An active archive account: a URL plus an archive-issued user ID."""
+
     url: str
     user_id: UserId
 
-    @property
-    def id(self) -> ArchiveId:
-        return blake3(dill.dumps((self.url, self.user_id))).hexdigest()
+
+@dataclass(frozen=True, slots=True)
+class ReferenceObject:
+    """A relative file path and a content hash."""
+
+    path: str
+    content: ContentId
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestObject:
+    """An array of reference hashes."""
+
+    references: tuple[ReferenceId, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotObject:
+    """A manifest hash and an optional note."""
+
+    manifest: ManifestId
+    note: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceObject:
+    """An array of snapshot hashes; array position is the version number."""
+
+    snapshots: tuple[SnapshotId, ...] = ()
