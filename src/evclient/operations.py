@@ -252,6 +252,20 @@ async def _delete_snapshot(stores: ObjectStores, snapshot_payload: bytes) -> Non
     await stores.manifest.delete(manifest_hash)
 
 
+def _unique(hashes: tuple[Digest, ...]) -> list[Digest]:
+    """Distinct hashes, order preserved (duplicate snapshots share one hash)."""
+    return list(dict.fromkeys(hashes))
+
+
+async def _delete_snapshots(
+    stores: ObjectStores, snapshot_hashes: tuple[Digest, ...]
+) -> None:
+    for snapshot_hash in _unique(snapshot_hashes):
+        payload = await stores.snapshot.get(snapshot_hash)
+        await _delete_snapshot(stores, payload)
+        await stores.snapshot.delete(snapshot_hash)
+
+
 async def _forget_by_version(
     session: aiohttp.ClientSession,
     archives: list[Archive],
@@ -260,16 +274,13 @@ async def _forget_by_version(
     on_forget: Callable[[Archive, int | None], None],
 ) -> WorkspaceObject:
     position = _select_positions(len(workspace.snapshots), version, "single")[0]
-    snapshot_hash = workspace.snapshots[position]
     trimmed = WorkspaceObject(
         snapshots=workspace.snapshots[:position] + workspace.snapshots[position + 1 :]
     )
     trimmed_hash = hash_object(trimmed)
     for archive in archives:
         stores = object_stores(session, archive)
-        payload = await stores.snapshot.get(snapshot_hash)
-        await _delete_snapshot(stores, payload)
-        await stores.snapshot.delete(snapshot_hash)
+        await _delete_snapshots(stores, (workspace.snapshots[position],))
         await stores.workspace.set(trimmed_hash, encode(trimmed))
         on_forget(archive, position + 1)
     LOGGER.info("forgot version %d on %d archive(s)", version, len(archives))
@@ -286,10 +297,7 @@ async def _forget_all(
     empty_hash = hash_object(empty)
     for archive in archives:
         stores = object_stores(session, archive)
-        for snapshot_hash in workspace.snapshots:
-            payload = await stores.snapshot.get(snapshot_hash)
-            await _delete_snapshot(stores, payload)
-            await stores.snapshot.delete(snapshot_hash)
+        await _delete_snapshots(stores, workspace.snapshots)
         await stores.workspace.set(empty_hash, encode(empty))
         on_forget(archive, None)
     LOGGER.info("forgot all versions on %d archive(s)", len(archives))

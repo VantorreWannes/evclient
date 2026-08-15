@@ -74,6 +74,9 @@ class ArchiveStore(Store[Digest, bytes]):
     async def delete(self, key: Digest) -> None:
         LOGGER.debug("DELETE %s", self._url(key))
         async with self._session.delete(self._url(key)) as response:
+            if response.status == HTTPStatus.NOT_FOUND:
+                LOGGER.debug("DELETE %s -> already gone", self._url(key))
+                return
             response.raise_for_status()
 
 
