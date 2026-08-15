@@ -1,5 +1,6 @@
 import logging
 from dataclasses import dataclass
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Protocol, override
 
 from evclient.types import Digest, normalize_url
@@ -54,8 +55,17 @@ class ArchiveStore(Store[Digest, bytes]):
         LOGGER.debug("GET %s -> %d bytes", self._url(key), len(payload))
         return payload
 
+    async def _has(self, key: Digest) -> bool:
+        LOGGER.debug("HEAD %s", self._url(key))
+        async with self._session.head(self._url(key)) as response:
+            exists = response.status == HTTPStatus.OK
+        LOGGER.debug("HEAD %s -> %s", self._url(key), "hit" if exists else "miss")
+        return exists
+
     @override
     async def set(self, key: Digest, value: bytes) -> None:
+        if await self._has(key):
+            return
         LOGGER.debug("PUT %s (%d bytes)", self._url(key), len(value))
         async with self._session.put(self._url(key), data=value) as response:
             response.raise_for_status()

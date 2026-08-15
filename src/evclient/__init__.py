@@ -145,13 +145,10 @@ async def _run(args: argparse.Namespace) -> None:
         )
     elif args.command == "list":
         archive, listings = await list_command(_workspace(args.path), args.version)
-        LOGGER.info("archive: %s %s", archive.url, archive.user_id)
+        print(f"archive: {archive.url} {archive.user_id}")  # noqa: T201
         for listing in listings:
-            LOGGER.info(
-                "%d: %s%s",
-                listing.number,
-                listing.identifier,
-                _version_suffix(listing.note),
+            print(  # noqa: T201
+                f"{listing.number}: {listing.identifier}{_version_suffix(listing.note)}"
             )
     elif args.command == "clone":
         archive, first, last = await clone_command(
