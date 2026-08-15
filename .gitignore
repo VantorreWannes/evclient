@@ -1,1 +1,3 @@
 src/evclient/__pycache__/
+dist/
+build/ev/

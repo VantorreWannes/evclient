@@ -178,3 +178,6 @@ def main() -> None:
     except (EvError, OSError, ValueError) as error:
         LOGGER.exception("Found an error")
         raise SystemExit(1) from error
+
+if __name__ == "__main__":
+    main()
