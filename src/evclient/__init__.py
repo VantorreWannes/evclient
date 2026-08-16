@@ -1,10 +1,10 @@
 import argparse
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from evclient.operations import (
-    Archive,
     clone_command,
     forget_command,
     list_command,
@@ -14,9 +14,95 @@ from evclient.operations import (
     save_command,
     unregister_command,
 )
-from evclient.types import EvError
+from evclient.types import Archive, EvError
 
 LOGGER = logging.getLogger("evclient")
+
+
+def _note_suffix(note: str | None) -> str:
+    return f" -- {note}" if note else ""
+
+
+def _workspace(raw: str) -> Path:
+    return Path(raw).expanduser().resolve()
+
+
+def _archive_url(raw: str) -> str:
+    if raw == ".":
+        msg = "archive command requires an archive URL"
+        raise EvError(msg)
+    return raw
+
+
+def _forget_message(archive: Archive, number: int | None) -> str:
+    target = f"version {number}" if number is not None else "all versions"
+    return f"{archive.url} {archive.user_id}: forgot {target}"
+
+
+async def _register(args: argparse.Namespace) -> None:
+    user_id = await register_command(_archive_url(args.path), args.user)
+    print(user_id)  # noqa: T201
+
+
+async def _unregister(args: argparse.Namespace) -> None:
+    await unregister_command(_archive_url(args.path), args.user)
+    LOGGER.info("unregistered: %s %s", args.path, args.user)
+
+
+async def _login(args: argparse.Namespace) -> None:
+    archive = login_command(_workspace(args.path), args.archive, args.user)
+    LOGGER.info("logged in: %s %s", archive.url, archive.user_id)
+
+
+async def _logout(args: argparse.Namespace) -> None:
+    logout_command(_workspace(args.path), args.archive, args.user)
+    LOGGER.info("logged out: %s %s", args.archive, args.user)
+
+
+async def _save(args: argparse.Namespace) -> None:
+    archive, number, _ = await save_command(_workspace(args.path), args.note)
+    LOGGER.info(
+        "saved version %d to %s%s", number, archive.url, _note_suffix(args.note)
+    )
+
+
+async def _list(args: argparse.Namespace) -> None:
+    _, listings = await list_command(_workspace(args.path), args.version)
+    for listing in listings:
+        print(f"{listing.number}: {listing.identifier}{_note_suffix(listing.note)}")  # noqa: T201
+
+
+async def _clone(args: argparse.Namespace) -> None:
+    archive, first, last = await clone_command(
+        _workspace(args.path), _workspace(args.target), args.version
+    )
+    span = f"versions {first}..{last}" if first != last else f"version {first}"
+    LOGGER.info(
+        "cloned %s from %s to %s via %s", span, args.path, args.target, archive.url
+    )
+
+
+async def _forget(args: argparse.Namespace) -> None:
+    await forget_command(
+        _workspace(args.path),
+        args.version,
+        args.forget_all,
+        lambda archive, number: LOGGER.info("%s", _forget_message(archive, number)),
+    )
+
+
+type CommandHandler = Callable[[argparse.Namespace], Awaitable[None]]
+
+_COMMANDS: dict[str, CommandHandler] = {
+    "archive/register": _register,
+    "archive/unregister": _unregister,
+    "login": _login,
+    "logout": _logout,
+    "save": _save,
+    "list": _list,
+    "clone": _clone,
+    "forget": _forget,
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,9 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    archive_parser = subparsers.add_parser(
-        "archive", help="Manage archive user accounts."
-    )
+    archive_parser = subparsers.add_parser("archive", help="Manage archive accounts.")
     archive_subparsers = archive_parser.add_subparsers(dest="action", required=True)
     register_parser = archive_subparsers.add_parser(
         "register", help="Claim a user ID; archive-chosen when omitted."
@@ -68,23 +152,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_parser = subparsers.add_parser("list", help="List versions.")
     list_parser.add_argument(
-        "--version",
-        "-v",
-        dest="version",
-        type=int,
-        default=None,
-        help="Version number.",
+        "--version", "-V", dest="version", type=int, default=None, help="Version."
     )
 
     clone_parser = subparsers.add_parser("clone", help="Clone a workspace.")
     clone_parser.add_argument("target", help="Target path, may not exist.")
     clone_parser.add_argument(
-        "--version",
-        "-v",
-        dest="version",
-        type=int,
-        default=None,
-        help="Version number.",
+        "--version", "-V", dest="version", type=int, default=None, help="Version."
     )
 
     forget_parser = subparsers.add_parser(
@@ -92,76 +166,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     forget_group = forget_parser.add_mutually_exclusive_group(required=True)
     forget_group.add_argument(
-        "--version",
-        "-v",
-        dest="version",
-        type=int,
-        default=None,
-        help="Version number.",
+        "--version", "-V", dest="version", type=int, default=None, help="Version."
     )
     forget_group.add_argument(
         "--all", "-a", dest="forget_all", action="store_true", help="All versions."
     )
 
     return parser
-
-
-def _workspace(path: str) -> Path:
-    return Path(path).expanduser().resolve()
-
-
-def _version_suffix(note: str | None) -> str:
-    return f" -- {note}" if note else ""
-
-
-def _report_forget(archive: Archive, number: int | None) -> None:
-    target = f"version {number}" if number is not None else "all versions"
-    LOGGER.info("%s %s: forgot %s", archive.url, archive.user_id, target)
-
-
-def _archive_url(args: argparse.Namespace) -> str:
-    if args.path == ".":
-        msg = "archive command requires an archive URL"
-        raise EvError(msg)
-    return args.path
-
-
-async def _run(args: argparse.Namespace) -> None:
-    if args.command == "archive" and args.action == "register":
-        user_id = await register_command(_archive_url(args), args.user)
-        print(user_id)  # noqa: T201  (the claimed user ID is program output, not a log)
-    elif args.command == "archive" and args.action == "unregister":
-        await unregister_command(_archive_url(args), args.user)
-    elif args.command == "login":
-        archive = login_command(_workspace(args.path), args.archive, args.user)
-        LOGGER.info("logged in: %s %s", archive.url, archive.user_id)
-    elif args.command == "logout":
-        logout_command(_workspace(args.path), args.archive, args.user)
-        LOGGER.info("logged out: %s %s", args.archive, args.user)
-    elif args.command == "save":
-        archive, number, _ = await save_command(_workspace(args.path), args.note)
-        LOGGER.info(
-            "saved version %d to %s%s", number, archive.url, _version_suffix(args.note)
-        )
-    elif args.command == "list":
-        archive, listings = await list_command(_workspace(args.path), args.version)
-        print(f"archive: {archive.url} {archive.user_id}")  # noqa: T201
-        for listing in listings:
-            print(  # noqa: T201
-                f"{listing.number}: {listing.identifier}{_version_suffix(listing.note)}"
-            )
-    elif args.command == "clone":
-        archive, first, last = await clone_command(
-            _workspace(args.path), _workspace(args.target), args.version
-        )
-        span = f"versions {first}..{last}" if first != last else f"version {first}"
-        LOGGER.info(
-            "cloned %s from %s to %s via %s", span, args.path, args.target, archive.url
-        )
-    elif args.command == "forget":
-        await forget_command(
-            _workspace(args.path), args.version, args.forget_all, _report_forget
-        )
 
 
 def _log_level(verbosity: int) -> int:
@@ -173,11 +184,13 @@ def main() -> None:
     logging.basicConfig(
         level=_log_level(args.verbose), format="%(levelname)s %(name)s: %(message)s"
     )
+    key = f"{args.command}/{args.action}" if args.command == "archive" else args.command
     try:
-        asyncio.run(_run(args))
+        asyncio.run(_COMMANDS[key](args))
     except (EvError, OSError, ValueError) as error:
-        LOGGER.exception("Found an error")
+        LOGGER.error("%s", error)  # noqa: TRY400 (no traceback for expected errors)
         raise SystemExit(1) from error
+
 
 if __name__ == "__main__":
     main()
