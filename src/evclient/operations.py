@@ -2,9 +2,11 @@ import asyncio
 import logging
 from collections.abc import Callable  # noqa: TC003
 from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path  # noqa: TC003
 
 import aiohttp
+from aiohttp import ClientResponseError
 
 from evclient.stores import ObjectStores, object_stores
 from evclient.types import (
@@ -244,9 +246,23 @@ async def clone_command(
 async def _delete_snapshot(stores: ObjectStores, snapshot_payload: bytes) -> None:
     snapshot = decode(SnapshotObject, snapshot_payload)
     manifest_hash = snapshot.manifest
-    manifest = decode(ManifestObject, await stores.manifest.get(manifest_hash))
+    try:
+        manifest = decode(ManifestObject, await stores.manifest.get(manifest_hash))
+    except ClientResponseError as error:
+        if error.status != HTTPStatus.NOT_FOUND:
+            raise
+        LOGGER.debug("manifest %s already gone; skipping its objects", manifest_hash)
+        return
     for reference_hash in manifest.references:
-        reference = decode(ReferenceObject, await stores.reference.get(reference_hash))
+        try:
+            reference = decode(
+                ReferenceObject, await stores.reference.get(reference_hash)
+            )
+        except ClientResponseError as error:
+            if error.status != HTTPStatus.NOT_FOUND:
+                raise
+            LOGGER.debug("reference %s already gone; skipping", reference_hash)
+            continue
         await stores.content.delete(reference.content)
         await stores.reference.delete(reference_hash)
     await stores.manifest.delete(manifest_hash)
@@ -261,7 +277,13 @@ async def _delete_snapshots(
     stores: ObjectStores, snapshot_hashes: tuple[Digest, ...]
 ) -> None:
     for snapshot_hash in _unique(snapshot_hashes):
-        payload = await stores.snapshot.get(snapshot_hash)
+        try:
+            payload = await stores.snapshot.get(snapshot_hash)
+        except ClientResponseError as error:
+            if error.status != HTTPStatus.NOT_FOUND:
+                raise
+            LOGGER.debug("snapshot %s already gone; skipping", snapshot_hash)
+            continue
         await _delete_snapshot(stores, payload)
         await stores.snapshot.delete(snapshot_hash)
 
@@ -278,9 +300,23 @@ async def _forget_by_version(
         snapshots=workspace.snapshots[:position] + workspace.snapshots[position + 1 :]
     )
     trimmed_hash = hash_object(trimmed)
+    snapshot_hash = workspace.snapshots[position]
     for archive in archives:
         stores = object_stores(session, archive)
-        await _delete_snapshots(stores, (workspace.snapshots[position],))
+        try:
+            payload = await stores.snapshot.get(snapshot_hash)
+        except ClientResponseError as error:
+            if error.status != HTTPStatus.NOT_FOUND:
+                raise
+            LOGGER.warning(
+                "version %d already forgotten on %s %s",
+                version,
+                archive.url,
+                archive.user_id,
+            )
+        else:
+            await _delete_snapshot(stores, payload)
+            await stores.snapshot.delete(snapshot_hash)
         await stores.workspace.set(trimmed_hash, encode(trimmed))
         on_forget(archive, position + 1)
     LOGGER.info("forgot version %d on %d archive(s)", version, len(archives))
