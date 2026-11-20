@@ -4,6 +4,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+import aiohttp
+
 from evclient.operations import (
     clone_command,
     forget_command,
@@ -191,7 +193,7 @@ def main() -> None:
     key = f"{args.command}/{args.action}"
     try:
         asyncio.run(_COMMANDS[key](args))
-    except (EvError, OSError, ValueError) as error:
+    except (EvError, aiohttp.ClientError, OSError, ValueError) as error:
         LOGGER.error("%s", error)  # noqa: TRY400 (no traceback for expected errors)
         raise SystemExit(1) from error
 

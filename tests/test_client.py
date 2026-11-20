@@ -4,6 +4,7 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+import aiohttp
 import pytest
 import uvicorn
 from evserver import application
@@ -237,5 +238,50 @@ def test_clone_versions(server_url: str, tmp_path: Path) -> None:
 
         with pytest.raises(EvError, match="target already exists"):
             await clone_command(workspace_dir, cloned_v1)
+
+    asyncio.run(run())
+
+
+def test_multiple_fallible_remotes(server_url: str, tmp_path: Path) -> None:
+    dead_url = f"http://127.0.0.1:{_free_port()}"
+
+    async def run() -> None:
+        await register_command(server_url, "alice")
+        workspace_dir = tmp_path / "ws"
+        workspace_dir.mkdir()
+        (workspace_dir / "file.txt").write_text("v1", encoding="utf-8")
+
+        login_command(workspace_dir, dead_url, "alice")
+        login_command(workspace_dir, server_url, "alice")
+
+        archive, version, _ = await save_command(workspace_dir, note="fallback save")
+        assert archive.url == server_url
+        assert version == 1
+
+        list_archive, listings = await list_command(workspace_dir)
+        assert list_archive.url == server_url
+        assert [(item.number, item.note) for item in listings] == [(1, "fallback save")]
+
+        cloned_dir = tmp_path / "cloned"
+        clone_archive, first, last = await clone_command(workspace_dir, cloned_dir)
+        assert clone_archive.url == server_url
+        assert (first, last) == (1, 1)
+        assert (cloned_dir / "file.txt").read_text(encoding="utf-8") == "v1"
+
+        forgotten: list[str] = []
+        await forget_command(
+            workspace_dir,
+            version=1,
+            forget_all=False,
+            on_forget=lambda item, _: forgotten.append(item.url),
+        )
+        assert forgotten == [server_url]
+
+        with pytest.raises(EvError, match="workspace has no versions"):
+            await list_command(workspace_dir)
+
+        logout_command(workspace_dir, server_url, "alice")
+        with pytest.raises(aiohttp.ClientError):
+            await save_command(workspace_dir, note="all down")
 
     asyncio.run(run())
