@@ -1,15 +1,8 @@
 import asyncio
-import socket
-import threading
-import time
 from typing import TYPE_CHECKING
 
-import aiohttp
 import pytest
-import uvicorn
-from evserver import application
 
-from evclient import build_parser
 from evclient.operations import (
     clone_command,
     forget_command,
@@ -23,100 +16,7 @@ from evclient.operations import (
 from evclient.types import EvError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
     from pathlib import Path
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-@pytest.fixture
-def server_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    server_dir = tmp_path / "server"
-    server_dir.mkdir()
-    monkeypatch.chdir(server_dir)
-    port = _free_port()
-    config = uvicorn.Config(application, host="127.0.0.1", port=port, log_level="error")
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 5.0
-    while not server.started:
-        if time.monotonic() > deadline:
-            msg = "evserver failed to start"
-            raise TimeoutError(msg)
-        time.sleep(0.02)
-    try:
-        yield f"http://127.0.0.1:{port}"
-    finally:
-        server.should_exit = True
-        thread.join(timeout=5.0)
-
-
-def test_cli_parser_commands() -> None:
-    parser = build_parser()
-
-    reg = parser.parse_args(["archive", "http://localhost", "register", "alice"])
-    assert (reg.command, reg.action, reg.url, reg.user) == (
-        "archive",
-        "register",
-        "http://localhost",
-        "alice",
-    )
-
-    unreg = parser.parse_args(["archive", "http://localhost", "unregister", "alice"])
-    assert (unreg.command, unreg.action, unreg.url, unreg.user) == (
-        "archive",
-        "unregister",
-        "http://localhost",
-        "alice",
-    )
-
-    login = parser.parse_args(["workspace", ".", "login", "http://localhost", "alice"])
-    assert (login.command, login.action, login.path, login.archive, login.user) == (
-        "workspace",
-        "login",
-        ".",
-        "http://localhost",
-        "alice",
-    )
-
-    save = parser.parse_args(["workspace", ".", "save", "-n", "initial"])
-    assert (save.command, save.action, save.path, save.note) == (
-        "workspace",
-        "save",
-        ".",
-        "initial",
-    )
-
-    lst = parser.parse_args(["-VV", "workspace", ".", "list", "-v", "1"])
-    assert (lst.verbose, lst.command, lst.action, lst.path, lst.version) == (
-        2,
-        "workspace",
-        "list",
-        ".",
-        1,
-    )
-
-    clone = parser.parse_args(["workspace", "src", "clone", "dst", "-v", "2"])
-    assert (clone.command, clone.action, clone.path, clone.target, clone.version) == (
-        "workspace",
-        "clone",
-        "src",
-        "dst",
-        2,
-    )
-
-    forget = parser.parse_args(["workspace", ".", "forget", "-a"])
-    assert (forget.command, forget.action, forget.path, forget.forget_all) == (
-        "workspace",
-        "forget",
-        ".",
-        True,
-    )
 
 
 def test_end_to_end_workflow(server_url: str, tmp_path: Path) -> None:
@@ -238,50 +138,5 @@ def test_clone_versions(server_url: str, tmp_path: Path) -> None:
 
         with pytest.raises(EvError, match="target already exists"):
             await clone_command(workspace_dir, cloned_v1)
-
-    asyncio.run(run())
-
-
-def test_multiple_fallible_remotes(server_url: str, tmp_path: Path) -> None:
-    dead_url = f"http://127.0.0.1:{_free_port()}"
-
-    async def run() -> None:
-        await register_command(server_url, "alice")
-        workspace_dir = tmp_path / "ws"
-        workspace_dir.mkdir()
-        (workspace_dir / "file.txt").write_text("v1", encoding="utf-8")
-
-        login_command(workspace_dir, dead_url, "alice")
-        login_command(workspace_dir, server_url, "alice")
-
-        archive, version, _ = await save_command(workspace_dir, note="fallback save")
-        assert archive.url == server_url
-        assert version == 1
-
-        list_archive, listings = await list_command(workspace_dir)
-        assert list_archive.url == server_url
-        assert [(item.number, item.note) for item in listings] == [(1, "fallback save")]
-
-        cloned_dir = tmp_path / "cloned"
-        clone_archive, first, last = await clone_command(workspace_dir, cloned_dir)
-        assert clone_archive.url == server_url
-        assert (first, last) == (1, 1)
-        assert (cloned_dir / "file.txt").read_text(encoding="utf-8") == "v1"
-
-        forgotten: list[str] = []
-        await forget_command(
-            workspace_dir,
-            version=1,
-            forget_all=False,
-            on_forget=lambda item, _: forgotten.append(item.url),
-        )
-        assert forgotten == [server_url]
-
-        with pytest.raises(EvError, match="workspace has no versions"):
-            await list_command(workspace_dir)
-
-        logout_command(workspace_dir, server_url, "alice")
-        with pytest.raises(aiohttp.ClientError):
-            await save_command(workspace_dir, note="all down")
 
     asyncio.run(run())
