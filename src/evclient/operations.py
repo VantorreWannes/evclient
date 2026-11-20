@@ -42,6 +42,17 @@ LOGGER = logging.getLogger("evclient.operations")
 _REMOTE_ERRORS = (aiohttp.ClientError, OSError, TimeoutError, ValueError)
 
 
+def format_error(error: Exception) -> str:
+    if isinstance(error, aiohttp.ClientConnectorError):
+        detail = error.strerror or "connection failed"
+        return f"cannot connect to {error.host}:{error.port} ({detail})"
+    if isinstance(error, ClientResponseError):
+        return f"HTTP {error.status} ({error.message})"
+    if isinstance(error, TimeoutError):
+        return "timed out"
+    return str(error) or type(error).__name__
+
+
 async def _try_archives[T](
     archives: list[Archive],
     action: Callable[[Archive], Awaitable[T]],
@@ -51,7 +62,7 @@ async def _try_archives[T](
         try:
             return archive, await action(archive)
         except _REMOTE_ERRORS as error:
-            LOGGER.warning("archive %s failed: %s", archive.url, error)
+            LOGGER.warning("%s: %s", archive.url, format_error(error))
             last_error = error
     if last_error is None:
         message = "no active archive: login first"
@@ -176,7 +187,7 @@ async def save_command(
                 )
                 await stores.workspace.set(remote_workspace.id, remote_workspace)
             except _REMOTE_ERRORS as error:
-                LOGGER.warning("failed to save to %s: %s", archive.url, error)
+                LOGGER.warning("%s: %s", archive.url, format_error(error))
                 last_error = error
                 continue
             if first_success is None:
@@ -379,7 +390,7 @@ async def _forget_by_version(
                 await stores.snapshot.delete(snapshot_identifier)
             await stores.workspace.set(remote_workspace.id, remote_workspace)
         except _REMOTE_ERRORS as error:
-            LOGGER.warning("failed to forget on %s: %s", archive.url, error)
+            LOGGER.warning("%s: %s", archive.url, format_error(error))
             last_error = error
             continue
         succeeded += 1
@@ -406,7 +417,7 @@ async def _forget_all(
             await _delete_snapshots(stores, local_workspace.snapshots)
             await stores.workspace.set(remote_workspace.id, remote_workspace)
         except _REMOTE_ERRORS as error:
-            LOGGER.warning("failed to forget on %s: %s", archive.url, error)
+            LOGGER.warning("%s: %s", archive.url, format_error(error))
             last_error = error
             continue
         succeeded += 1
