@@ -1,3 +1,4 @@
 src/evclient/__pycache__/
 dist/
 build/ev/
+tests/__pycache__/

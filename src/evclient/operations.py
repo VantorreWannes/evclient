@@ -215,30 +215,39 @@ async def clone_command(
     if not local_workspace.snapshots:
         message = "source workspace has nothing to clone"
         raise EvError(message)
-    positions = _select_positions(len(local_workspace.snapshots), version, "suffix")
+    if version is None:
+        positions = _select_positions(len(local_workspace.snapshots), None, "suffix")
+        target_position = positions[-1]
+        first, last = positions[0] + 1, positions[-1] + 1
+        cloned_snapshots = local_workspace.snapshots
+    else:
+        target_position = _select_positions(
+            len(local_workspace.snapshots), version, "single"
+        )[0]
+        first = last = target_position + 1
+        cloned_snapshots = local_workspace.snapshots[: target_position + 1]
     async with aiohttp.ClientSession() as session:
         stores = object_stores(session, archive)
-        for position in positions:
-            for relative_path, data in await _restore_snapshot(
-                stores, local_workspace.snapshots[position]
-            ):
-                write_file(target_path, relative_path, data)
+        for relative_path, data in await _restore_snapshot(
+            stores, local_workspace.snapshots[target_position]
+        ):
+            write_file(target_path, relative_path, data)
     login_command(target_path, archive.url, archive.user_id)
     write_workspace(
         target_path,
         LocalWorkspace(
             identifier=new_workspace_identifier(),
-            snapshots=local_workspace.snapshots,
+            snapshots=cloned_snapshots,
         ),
     )
     LOGGER.info(
         "cloned version(s) %d..%d from %s to %s",
-        positions[0] + 1,
-        positions[-1] + 1,
+        first,
+        last,
         source_path,
         target_path,
     )
-    return archive, positions[0] + 1, positions[-1] + 1
+    return archive, first, last
 
 
 async def _delete_snapshot(stores: ObjectStores, snapshot: Snapshot) -> None:
