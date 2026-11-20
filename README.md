@@ -13,16 +13,16 @@ CLI client for EasyVersion content-hashed workspace archives.
 
 All commands accept `--help` / `-h`.
 
-| Command                                        | stdout                        | INFO log                  |
-| ---------------------------------------------- | ----------------------------- | ------------------------- |
-| `archive <url> register [user:ID]`             | claimed user ID               | -                         |
-| `archive <url> unregister <user:ID>`           | -                             | unregistered user         |
-| `workspace <path> login <url> <user:ID>`       | -                             | logged in archive + user  |
-| `workspace <path> logout <url> <user:ID>`      | -                             | logged out archive + user |
-| `workspace <path> save [-n note]`              | -                             | saved version number      |
-| `workspace <path> list [-v n]`                 | `N: hash -- note` per version | -                         |
-| `workspace <source> clone <target> [-v n]`     | -                             | cloned version span       |
-| `workspace <path> forget {-v n \| -a}`         | -                             | forgot per active archive |
+| Command                                    | stdout                        | INFO log                  |
+| ------------------------------------------ | ----------------------------- | ------------------------- |
+| `archive <url> register [user:ID]`         | claimed user ID               | -                         |
+| `archive <url> unregister <user:ID>`       | -                             | unregistered user         |
+| `workspace <path> login <url> <user:ID>`   | -                             | logged in archive + user  |
+| `workspace <path> logout <url> <user:ID>`  | -                             | logged out archive + user |
+| `workspace <path> save [-n note]`          | -                             | saved version number      |
+| `workspace <path> list [-v n]`             | `N: hash -- note` per version | -                         |
+| `workspace <source> clone <target> [-v n]` | -                             | cloned version span       |
+| `workspace <path> forget {-v n \| -a}`     | -                             | forgot per active archive |
 
 - `--version` short flag is `-v`; the top-level `-V` is verbosity (repeatable, must precede `archive` or `workspace`).
 - Exit codes: `0` success, `1` expected failure, `2` usage error.
