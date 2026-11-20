@@ -111,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--verbose",
-        "-v",
+        "-V",
         dest="verbose",
         action="count",
         default=0,
@@ -156,13 +156,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_parser = workspace_subparsers.add_parser("list", help="List versions.")
     list_parser.add_argument(
-        "--version", "-V", dest="version", type=int, default=None, help="Version."
+        "--version", "-v", dest="version", type=int, default=None, help="Version."
     )
 
     clone_parser = workspace_subparsers.add_parser("clone", help="Clone a workspace.")
     clone_parser.add_argument("target", help="Target path, may not exist.")
     clone_parser.add_argument(
-        "--version", "-V", dest="version", type=int, default=None, help="Version."
+        "--version", "-v", dest="version", type=int, default=None, help="Version."
     )
 
     forget_parser = workspace_subparsers.add_parser(
@@ -170,7 +170,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     forget_group = forget_parser.add_mutually_exclusive_group(required=True)
     forget_group.add_argument(
-        "--version", "-V", dest="version", type=int, default=None, help="Version."
+        "--version", "-v", dest="version", type=int, default=None, help="Version."
     )
     forget_group.add_argument(
         "--all", "-a", dest="forget_all", action="store_true", help="All versions."

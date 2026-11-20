@@ -5,7 +5,7 @@ CLI client for EasyVersion content-hashed workspace archives.
 ## Output contract
 
 - **stdout is for pipelines.** A command prints only what a caller wants to consume: `register` prints the claimed user ID, `list` prints one `N: hash -- note` line per version. Nothing else goes to stdout.
-- **stderr is for humans.** Progress, confirmations, and diagnostics go through logging: default shows WARNING and above, `-v` adds INFO, `-vv` adds DEBUG. The flag is global and is normalized once, in `main`.
+- **stderr is for humans.** Progress, confirmations, and diagnostics go through logging: default shows WARNING and above, `-V` adds INFO, `-VV` adds DEBUG. The flag is global and is normalized once, in `main`.
 - **Expected failures raise `EvError`** and render as one `ERROR: <message>` line, exit code 1, no traceback. Unexpected exceptions propagate with their traceback.
 - **Commands never print or log.** A command returns its outcome; the dispatcher decides whether that outcome goes to stdout or INFO.
 
@@ -20,11 +20,11 @@ All commands accept `--help` / `-h`.
 | `workspace <path> login <url> <user:ID>`       | -                             | logged in archive + user  |
 | `workspace <path> logout <url> <user:ID>`      | -                             | logged out archive + user |
 | `workspace <path> save [-n note]`              | -                             | saved version number      |
-| `workspace <path> list [-V n]`                 | `N: hash -- note` per version | -                         |
-| `workspace <source> clone <target> [-V n]`     | -                             | cloned version span       |
-| `workspace <path> forget {-V n \| -a}`         | -                             | forgot per active archive |
+| `workspace <path> list [-v n]`                 | `N: hash -- note` per version | -                         |
+| `workspace <source> clone <target> [-v n]`     | -                             | cloned version span       |
+| `workspace <path> forget {-v n \| -a}`         | -                             | forgot per active archive |
 
-- `--version` short flag is `-V`; the top-level `-v` is verbosity (repeatable, must precede `archive` or `workspace`).
+- `--version` short flag is `-v`; the top-level `-V` is verbosity (repeatable, must precede `archive` or `workspace`).
 - Exit codes: `0` success, `1` expected failure, `2` usage error.
 
 ## Archive

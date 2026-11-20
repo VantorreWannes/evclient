@@ -91,15 +91,16 @@ def test_cli_parser_commands() -> None:
         "initial",
     )
 
-    lst = parser.parse_args(["workspace", ".", "list", "-V", "1"])
-    assert (lst.command, lst.action, lst.path, lst.version) == (
+    lst = parser.parse_args(["-VV", "workspace", ".", "list", "-v", "1"])
+    assert (lst.verbose, lst.command, lst.action, lst.path, lst.version) == (
+        2,
         "workspace",
         "list",
         ".",
         1,
     )
 
-    clone = parser.parse_args(["workspace", "src", "clone", "dst", "-V", "2"])
+    clone = parser.parse_args(["workspace", "src", "clone", "dst", "-v", "2"])
     assert (clone.command, clone.action, clone.path, clone.target, clone.version) == (
         "workspace",
         "clone",
