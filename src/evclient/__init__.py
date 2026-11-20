@@ -29,8 +29,8 @@ def _workspace(raw: str) -> Path:
 
 def _archive_url(raw: str) -> str:
     if raw == ".":
-        msg = "archive command requires an archive URL"
-        raise EvError(msg)
+        message = "archive command requires an archive URL"
+        raise EvError(message)
     return raw
 
 
@@ -40,13 +40,13 @@ def _forget_message(archive: Archive, number: int | None) -> str:
 
 
 async def _register(args: argparse.Namespace) -> None:
-    user_id = await register_command(_archive_url(args.path), args.user)
+    user_id = await register_command(_archive_url(args.url), args.user)
     print(user_id)  # noqa: T201
 
 
 async def _unregister(args: argparse.Namespace) -> None:
-    await unregister_command(_archive_url(args.path), args.user)
-    LOGGER.info("unregistered: %s %s", args.path, args.user)
+    await unregister_command(_archive_url(args.url), args.user)
+    LOGGER.info("unregistered: %s %s", args.url, args.user)
 
 
 async def _login(args: argparse.Namespace) -> None:
@@ -96,21 +96,18 @@ type CommandHandler = Callable[[argparse.Namespace], Awaitable[None]]
 _COMMANDS: dict[str, CommandHandler] = {
     "archive/register": _register,
     "archive/unregister": _unregister,
-    "login": _login,
-    "logout": _logout,
-    "save": _save,
-    "list": _list,
-    "clone": _clone,
-    "forget": _forget,
+    "workspace/login": _login,
+    "workspace/logout": _logout,
+    "workspace/save": _save,
+    "workspace/list": _list,
+    "workspace/clone": _clone,
+    "workspace/forget": _forget,
 }
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ev", description="EasyVersion: content-hashed workspace archives."
-    )
-    parser.add_argument(
-        "path", help="Workspace path, or archive URL for `archive` commands."
     )
     parser.add_argument(
         "--verbose",
@@ -123,45 +120,52 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     archive_parser = subparsers.add_parser("archive", help="Manage archive accounts.")
+    archive_parser.add_argument("url", help="Archive URL.")
     archive_subparsers = archive_parser.add_subparsers(dest="action", required=True)
     register_parser = archive_subparsers.add_parser(
-        "register", help="Claim a user ID; archive-chosen when omitted."
+        "register", help="Claim a user ID; client-generated when omitted."
     )
     register_parser.add_argument("user", nargs="?", default=None, help="User ID.")
     unregister_parser = archive_subparsers.add_parser(
-        "unregister", help="Forget the user and everything it stored."
+        "unregister", help="Forget the user on the archive."
     )
     unregister_parser.add_argument("user", help="User ID.")
 
-    login_parser = subparsers.add_parser("login", help="Activate an archive account.")
+    workspace_parser = subparsers.add_parser("workspace", help="Manage workspaces.")
+    workspace_parser.add_argument("path", help="Workspace path.")
+    workspace_subparsers = workspace_parser.add_subparsers(dest="action", required=True)
+
+    login_parser = workspace_subparsers.add_parser(
+        "login", help="Activate an archive account."
+    )
     login_parser.add_argument("archive", help="Archive URL.")
     login_parser.add_argument("user", help="User ID.")
 
-    logout_parser = subparsers.add_parser(
+    logout_parser = workspace_subparsers.add_parser(
         "logout", help="Deactivate an archive account."
     )
     logout_parser.add_argument("archive", help="Archive URL.")
     logout_parser.add_argument("user", help="User ID.")
 
-    save_parser = subparsers.add_parser(
+    save_parser = workspace_subparsers.add_parser(
         "save", help="Save the current state as a version."
     )
     save_parser.add_argument(
         "--note", "-n", dest="note", default=None, help="Version note."
     )
 
-    list_parser = subparsers.add_parser("list", help="List versions.")
+    list_parser = workspace_subparsers.add_parser("list", help="List versions.")
     list_parser.add_argument(
         "--version", "-V", dest="version", type=int, default=None, help="Version."
     )
 
-    clone_parser = subparsers.add_parser("clone", help="Clone a workspace.")
+    clone_parser = workspace_subparsers.add_parser("clone", help="Clone a workspace.")
     clone_parser.add_argument("target", help="Target path, may not exist.")
     clone_parser.add_argument(
         "--version", "-V", dest="version", type=int, default=None, help="Version."
     )
 
-    forget_parser = subparsers.add_parser(
+    forget_parser = workspace_subparsers.add_parser(
         "forget", help="Forget versions on every archive."
     )
     forget_group = forget_parser.add_mutually_exclusive_group(required=True)
@@ -184,7 +188,7 @@ def main() -> None:
     logging.basicConfig(
         level=_log_level(args.verbose), format="%(levelname)s %(name)s: %(message)s"
     )
-    key = f"{args.command}/{args.action}" if args.command == "archive" else args.command
+    key = f"{args.command}/{args.action}"
     try:
         asyncio.run(_COMMANDS[key](args))
     except (EvError, OSError, ValueError) as error:

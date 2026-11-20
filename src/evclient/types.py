@@ -1,78 +1,66 @@
-from blake3 import blake3
+from dataclasses import dataclass as stdlib_dataclass
+from typing import TYPE_CHECKING
+from uuid import uuid4
+
+import dill
+from evserver.types import UserId, WorkspaceId
 from pydantic import TypeAdapter
 from pydantic.dataclasses import dataclass
 
-Digest = str
-UserId = str
-WorkspaceId = Digest
-SnapshotId = Digest
-ManifestId = Digest
-ReferenceId = Digest
-ContentId = Digest
+if TYPE_CHECKING:
+    from evserver.types import UserId, WorkspaceId
 
 
 class EvError(Exception):
-    """Raise for any user-facing failure; the client aborts immediately."""
+    pass
 
 
 def normalize_url(url: str) -> str:
-    """Strip trailing slashes so endpoint paths always join cleanly."""
     return url.rstrip("/")
 
 
-def hash_bytes(data: bytes) -> Digest:
-    """Hash raw bytes; content is identified by the blake3 of itself."""
-    return blake3(data).hexdigest()
+def new_workspace_identifier() -> WorkspaceId:
+    return uuid4().hex
 
 
-def encode[T](obj: T) -> bytes:
-    """Serialize an object to its canonical JSON payload."""
-    return TypeAdapter(type(obj)).dump_json(obj)
+def encode(value: object) -> bytes:
+    return dill.dumps(value)
 
 
-def decode[T](model: type[T], data: bytes) -> T:
-    """Parse an archive payload back into its object type."""
-    return TypeAdapter(model).validate_json(data)
+def decode[T](expected_type: type[T], data: bytes) -> T:
+    try:
+        value = dill.loads(data)  # noqa: S301
+    except Exception as error:
+        message = f"malformed archive payload: {error}"
+        raise EvError(message) from error
+    if not isinstance(value, expected_type):
+        message = (
+            f"unexpected payload type: expected {expected_type.__name__}, "
+            f"got {type(value).__name__}"
+        )
+        raise EvError(message)
+    return value
 
 
-def hash_object[T](obj: T) -> Digest:
-    """Hash an object's canonical payload: its address on the archive."""
-    return hash_bytes(encode(obj))
+def encode_json[T](value: T) -> bytes:
+    return TypeAdapter(type(value)).dump_json(value)
 
 
-@dataclass(frozen=True, slots=True)
+def decode_json[T](model: type[T], data: bytes) -> T:
+    try:
+        return TypeAdapter(model).validate_json(data)
+    except Exception as error:
+        message = f"malformed local state: {error}"
+        raise EvError(message) from error
+
+
+@stdlib_dataclass(frozen=True, slots=True)
 class Archive:
-    """An active archive account: a URL plus an archive-issued user ID."""
-
     url: str
     user_id: UserId
 
 
 @dataclass(frozen=True, slots=True)
-class ReferenceObject:
-    """A relative file path and a content hash."""
-
-    path: str
-    content: ContentId
-
-
-@dataclass(frozen=True, slots=True)
-class ManifestObject:
-    """An array of reference hashes."""
-
-    references: tuple[ReferenceId, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class SnapshotObject:
-    """A manifest hash and an optional note."""
-
-    manifest: ManifestId
-    note: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class WorkspaceObject:
-    """An array of snapshot hashes; array position is the version number."""
-
-    snapshots: tuple[SnapshotId, ...] = ()
+class LocalWorkspace:
+    identifier: str
+    snapshots: tuple[str, ...] = ()

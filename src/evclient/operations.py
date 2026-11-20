@@ -3,25 +3,29 @@ import logging
 from collections.abc import Callable  # noqa: TC003
 from dataclasses import dataclass
 from http import HTTPStatus
-from pathlib import Path  # noqa: TC003
+from pathlib import Path
+from uuid import uuid4
 
 import aiohttp
 from aiohttp import ClientResponseError
+from evserver.types import (
+    Content,
+    Manifest,
+    Reference,
+    ReferenceId,
+    Snapshot,
+    SnapshotId,
+    User,
+    UserId,
+    Workspace,
+)
 
-from evclient.stores import ObjectStores, object_stores
+from evclient.stores import ObjectStores, object_stores, user_store
 from evclient.types import (
     Archive,
-    Digest,
     EvError,
-    ManifestObject,
-    ReferenceObject,
-    SnapshotObject,
-    UserId,
-    WorkspaceObject,
-    decode,
-    encode,
-    hash_bytes,
-    hash_object,
+    LocalWorkspace,
+    new_workspace_identifier,
     normalize_url,
 )
 from evclient.workspace import (
@@ -39,41 +43,32 @@ LOGGER = logging.getLogger("evclient.operations")
 def _active_archives(workspace_path: Path) -> list[Archive]:
     archives = read_archives(workspace_path)
     if not archives:
-        msg = "no active archive: login first"
-        raise EvError(msg)
+        message = "no active archive: login first"
+        raise EvError(message)
     return archives
 
 
-async def _post_text(session: aiohttp.ClientSession, url: str) -> str:
-    async with session.post(url) as response:
-        response.raise_for_status()
-        return (await response.text()).strip()
-
-
 async def register_command(archive_url: str, user_id: UserId | None = None) -> UserId:
-    """Claim a user ID; the archive chooses it when omitted."""
     base = normalize_url(archive_url)
+    resolved_id = user_id if user_id is not None else uuid4().hex
     async with aiohttp.ClientSession() as session:
-        if user_id is None:
-            claimed = await _post_text(session, f"{base}/user/register")
-            LOGGER.info("registered archive-chosen user %s on %s", claimed, base)
-            return claimed
-        async with session.post(f"{base}/user/register/{user_id}") as response:
-            response.raise_for_status()
-            LOGGER.info("registered user %s on %s", user_id, base)
-            return user_id
+        store = user_store(session, base)
+        if user_id is not None and await store.has(resolved_id):
+            message = f"user already exists: {resolved_id}"
+            raise EvError(message)
+        await store.set(resolved_id, User(id=resolved_id))
+    LOGGER.info("registered user %s on %s", resolved_id, base)
+    return resolved_id
 
 
 async def unregister_command(archive_url: str, user_id: UserId) -> None:
-    """Forget the user and everything it stored on the archive."""
-    url = f"{normalize_url(archive_url)}/user/{user_id}"
-    async with aiohttp.ClientSession() as session, session.delete(url) as response:
-        response.raise_for_status()
-    LOGGER.info("unregistered user %s on %s", user_id, normalize_url(archive_url))
+    base = normalize_url(archive_url)
+    async with aiohttp.ClientSession() as session:
+        await user_store(session, base).delete(user_id)
+    LOGGER.info("unregistered user %s on %s", user_id, base)
 
 
 def login_command(workspace_path: Path, archive_url: str, user_id: UserId) -> Archive:
-    """Add the archive + user to the workspace's active archives."""
     archive = Archive(url=archive_url, user_id=user_id)
     archives = read_archives(workspace_path)
     if archive not in archives:
@@ -88,7 +83,6 @@ def login_command(workspace_path: Path, archive_url: str, user_id: UserId) -> Ar
 
 
 def logout_command(workspace_path: Path, archive_url: str, user_id: UserId) -> bool:
-    """Remove the archive + user from the workspace's active archives."""
     archive = Archive(url=archive_url, user_id=user_id)
     archives = read_archives(workspace_path)
     if archive not in archives:
@@ -103,29 +97,19 @@ def logout_command(workspace_path: Path, archive_url: str, user_id: UserId) -> b
 @dataclass(frozen=True, slots=True)
 class VersionListing:
     number: int
-    identifier: Digest
+    identifier: SnapshotId
     note: str | None
 
 
-async def _read_snapshots(
-    stores: ObjectStores, workspace: WorkspaceObject
-) -> list[SnapshotObject]:
-    return [
-        decode(SnapshotObject, await stores.snapshot.get(snapshot_hash))
-        for snapshot_hash in workspace.snapshots
-    ]
-
-
 def _select_positions(count: int, version: int | None, mode: str) -> list[int]:
-    """Map an optional 1-based version number onto array positions."""
     if count == 0:
-        msg = "workspace has no versions"
-        raise EvError(msg)
+        message = "workspace has no versions"
+        raise EvError(message)
     if version is None:
         return list(range(count))
     if not 1 <= version <= count:
-        msg = f"version {version} out of range (1..{count})"
-        raise EvError(msg)
+        message = f"version {version} out of range (1..{count})"
+        raise EvError(message)
     position = version - 1
     if mode == "single":
         return [position]
@@ -134,105 +118,119 @@ def _select_positions(count: int, version: int | None, mode: str) -> list[int]:
 
 async def _store_files(
     stores: ObjectStores, files: list[tuple[str, bytes]]
-) -> ManifestObject:
-    async def store_file(path: str, data: bytes) -> Digest:
-        reference = ReferenceObject(path=path, content=hash_bytes(data))
-        await stores.content.set(reference.content, data)
-        await stores.reference.set(hash_object(reference), encode(reference))
-        return hash_object(reference)
+) -> Manifest:
+    async def store_file(path: str, data: bytes) -> ReferenceId:
+        content = Content(data=data)
+        await stores.content.set(content.id, content)
+        reference = Reference(file_path=Path(path), content_id=content.id)
+        await stores.reference.set(reference.id, reference)
+        return reference.id
 
     references = [await store_file(path, data) for path, data in files]
     LOGGER.debug("stored %d file(s) as %d reference(s)", len(files), len(references))
-    return ManifestObject(references=tuple(references))
+    return Manifest(reference_ids=set(references))
 
 
 async def save_command(
     workspace_path: Path, note: str | None = None
-) -> tuple[Archive, int, Digest]:
-    """Save the workspace's current state as a new version on the first archive."""
+) -> tuple[Archive, int, SnapshotId]:
     archive = _active_archives(workspace_path)[0]
     files = scan_files(workspace_path)
     async with aiohttp.ClientSession() as session:
         stores = object_stores(session, archive)
         manifest = await _store_files(stores, files)
-        manifest_hash = hash_object(manifest)
-        await stores.manifest.set(manifest_hash, encode(manifest))
-        snapshot = SnapshotObject(manifest=manifest_hash, note=note)
-        snapshot_hash = hash_object(snapshot)
-        await stores.snapshot.set(snapshot_hash, encode(snapshot))
-        workspace = WorkspaceObject(
-            snapshots=(*read_workspace(workspace_path).snapshots, snapshot_hash)
+        await stores.manifest.set(manifest.id, manifest)
+        snapshot = Snapshot(manifest_id=manifest.id, note=note)
+        await stores.snapshot.set(snapshot.id, snapshot)
+        local_workspace = read_workspace(workspace_path)
+        updated_local = LocalWorkspace(
+            identifier=local_workspace.identifier,
+            snapshots=(*local_workspace.snapshots, snapshot.id),
         )
-        await stores.workspace.set(hash_object(workspace), encode(workspace))
-        write_workspace(workspace_path, workspace)
+        remote_workspace = Workspace(
+            snapshot_ids=set(updated_local.snapshots),
+            id=updated_local.identifier,
+        )
+        await stores.workspace.set(remote_workspace.id, remote_workspace)
+        write_workspace(workspace_path, updated_local)
     LOGGER.info(
         "saved version %d to %s (%d file(s))",
-        len(workspace.snapshots),
+        len(updated_local.snapshots),
         archive.url,
         len(files),
     )
-    return archive, len(workspace.snapshots), snapshot_hash
+    return archive, len(updated_local.snapshots), snapshot.id
 
 
 async def list_command(
     workspace_path: Path, version: int | None = None
 ) -> tuple[Archive, list[VersionListing]]:
-    """List the workspace's versions, or only the requested one."""
     archive = _active_archives(workspace_path)[0]
-    workspace = read_workspace(workspace_path)
-    positions = _select_positions(len(workspace.snapshots), version, "single")
+    local_workspace = read_workspace(workspace_path)
+    positions = _select_positions(len(local_workspace.snapshots), version, "single")
     async with aiohttp.ClientSession() as session:
-        snapshots = await _read_snapshots(object_stores(session, archive), workspace)
+        stores = object_stores(session, archive)
+        snapshots = await asyncio.gather(
+            *(
+                stores.snapshot.get(local_workspace.snapshots[position])
+                for position in positions
+            )
+        )
     return archive, [
         VersionListing(
             number=position + 1,
-            identifier=workspace.snapshots[position],
-            note=snapshots[position].note,
+            identifier=local_workspace.snapshots[position],
+            note=snapshot.note,
         )
-        for position in positions
+        for position, snapshot in zip(positions, snapshots, strict=True)
     ]
 
 
 async def _restore_snapshot(
-    stores: ObjectStores, snapshot_hash: Digest
+    stores: ObjectStores, snapshot_identifier: SnapshotId
 ) -> list[tuple[str, bytes]]:
-    snapshot = decode(SnapshotObject, await stores.snapshot.get(snapshot_hash))
-    manifest = decode(ManifestObject, await stores.manifest.get(snapshot.manifest))
+    snapshot = await stores.snapshot.get(snapshot_identifier)
+    manifest = await stores.manifest.get(snapshot.manifest_id)
     references = [
-        decode(ReferenceObject, await stores.reference.get(reference_hash))
-        for reference_hash in manifest.references
+        await stores.reference.get(reference_identifier)
+        for reference_identifier in manifest.reference_ids
     ]
     contents = await asyncio.gather(
-        *(stores.content.get(reference.content) for reference in references)
+        *(stores.content.get(reference.content_id) for reference in references)
     )
     return [
-        (reference.path, data)
-        for reference, data in zip(references, contents, strict=True)
+        (reference.file_path.as_posix(), content.data)
+        for reference, content in zip(references, contents, strict=True)
     ]
 
 
 async def clone_command(
     source_path: Path, target_path: Path, version: int | None = None
 ) -> tuple[Archive, int, int]:
-    """Clone the source workspace to the target path, which may not exist yet."""
     if target_path.exists():  # noqa: ASYNC240
-        msg = f"target already exists: {target_path}"
-        raise EvError(msg)
+        message = f"target already exists: {target_path}"
+        raise EvError(message)
     archive = _active_archives(source_path)[0]
-    workspace = read_workspace(source_path)
-    if not workspace.snapshots:
-        msg = "source workspace has nothing to clone"
-        raise EvError(msg)
-    positions = _select_positions(len(workspace.snapshots), version, "suffix")
+    local_workspace = read_workspace(source_path)
+    if not local_workspace.snapshots:
+        message = "source workspace has nothing to clone"
+        raise EvError(message)
+    positions = _select_positions(len(local_workspace.snapshots), version, "suffix")
     async with aiohttp.ClientSession() as session:
         stores = object_stores(session, archive)
         for position in positions:
             for relative_path, data in await _restore_snapshot(
-                stores, workspace.snapshots[position]
+                stores, local_workspace.snapshots[position]
             ):
                 write_file(target_path, relative_path, data)
     login_command(target_path, archive.url, archive.user_id)
-    write_workspace(target_path, WorkspaceObject(snapshots=workspace.snapshots))
+    write_workspace(
+        target_path,
+        LocalWorkspace(
+            identifier=new_workspace_identifier(),
+            snapshots=local_workspace.snapshots,
+        ),
+    )
     LOGGER.info(
         "cloned version(s) %d..%d from %s to %s",
         positions[0] + 1,
@@ -243,68 +241,73 @@ async def clone_command(
     return archive, positions[0] + 1, positions[-1] + 1
 
 
-async def _delete_snapshot(stores: ObjectStores, snapshot_payload: bytes) -> None:
-    snapshot = decode(SnapshotObject, snapshot_payload)
-    manifest_hash = snapshot.manifest
+async def _delete_snapshot(stores: ObjectStores, snapshot: Snapshot) -> None:
+    manifest_identifier = snapshot.manifest_id
     try:
-        manifest = decode(ManifestObject, await stores.manifest.get(manifest_hash))
+        manifest = await stores.manifest.get(manifest_identifier)
     except ClientResponseError as error:
         if error.status != HTTPStatus.NOT_FOUND:
             raise
-        LOGGER.debug("manifest %s already gone; skipping its objects", manifest_hash)
+        LOGGER.debug(
+            "manifest %s already gone; skipping its objects", manifest_identifier
+        )
         return
-    for reference_hash in manifest.references:
+    for reference_identifier in manifest.reference_ids:
         try:
-            reference = decode(
-                ReferenceObject, await stores.reference.get(reference_hash)
-            )
+            reference = await stores.reference.get(reference_identifier)
         except ClientResponseError as error:
             if error.status != HTTPStatus.NOT_FOUND:
                 raise
-            LOGGER.debug("reference %s already gone; skipping", reference_hash)
+            LOGGER.debug("reference %s already gone; skipping", reference_identifier)
             continue
-        await stores.content.delete(reference.content)
-        await stores.reference.delete(reference_hash)
-    await stores.manifest.delete(manifest_hash)
+        await stores.content.delete(reference.content_id)
+        await stores.reference.delete(reference_identifier)
+    await stores.manifest.delete(manifest_identifier)
 
 
-def _unique(hashes: tuple[Digest, ...]) -> list[Digest]:
-    """Distinct hashes, order preserved (duplicate snapshots share one hash)."""
-    return list(dict.fromkeys(hashes))
+def _unique(identifiers: tuple[SnapshotId, ...]) -> list[SnapshotId]:
+    return list(dict.fromkeys(identifiers))
 
 
 async def _delete_snapshots(
-    stores: ObjectStores, snapshot_hashes: tuple[Digest, ...]
+    stores: ObjectStores, snapshot_identifiers: tuple[SnapshotId, ...]
 ) -> None:
-    for snapshot_hash in _unique(snapshot_hashes):
+    for snapshot_identifier in _unique(snapshot_identifiers):
         try:
-            payload = await stores.snapshot.get(snapshot_hash)
+            snapshot = await stores.snapshot.get(snapshot_identifier)
         except ClientResponseError as error:
             if error.status != HTTPStatus.NOT_FOUND:
                 raise
-            LOGGER.debug("snapshot %s already gone; skipping", snapshot_hash)
+            LOGGER.debug("snapshot %s already gone; skipping", snapshot_identifier)
             continue
-        await _delete_snapshot(stores, payload)
-        await stores.snapshot.delete(snapshot_hash)
+        await _delete_snapshot(stores, snapshot)
+        await stores.snapshot.delete(snapshot_identifier)
 
 
 async def _forget_by_version(
     session: aiohttp.ClientSession,
     archives: list[Archive],
-    workspace: WorkspaceObject,
+    local_workspace: LocalWorkspace,
     version: int,
     on_forget: Callable[[Archive, int | None], None],
-) -> WorkspaceObject:
-    position = _select_positions(len(workspace.snapshots), version, "single")[0]
-    trimmed = WorkspaceObject(
-        snapshots=workspace.snapshots[:position] + workspace.snapshots[position + 1 :]
+) -> LocalWorkspace:
+    position = _select_positions(len(local_workspace.snapshots), version, "single")[0]
+    trimmed = LocalWorkspace(
+        identifier=local_workspace.identifier,
+        snapshots=(
+            local_workspace.snapshots[:position]
+            + local_workspace.snapshots[position + 1 :]
+        ),
     )
-    trimmed_hash = hash_object(trimmed)
-    snapshot_hash = workspace.snapshots[position]
+    remote_workspace = Workspace(
+        snapshot_ids=set(trimmed.snapshots),
+        id=trimmed.identifier,
+    )
+    snapshot_identifier = local_workspace.snapshots[position]
     for archive in archives:
         stores = object_stores(session, archive)
         try:
-            payload = await stores.snapshot.get(snapshot_hash)
+            snapshot = await stores.snapshot.get(snapshot_identifier)
         except ClientResponseError as error:
             if error.status != HTTPStatus.NOT_FOUND:
                 raise
@@ -315,9 +318,9 @@ async def _forget_by_version(
                 archive.user_id,
             )
         else:
-            await _delete_snapshot(stores, payload)
-            await stores.snapshot.delete(snapshot_hash)
-        await stores.workspace.set(trimmed_hash, encode(trimmed))
+            await _delete_snapshot(stores, snapshot)
+            await stores.snapshot.delete(snapshot_identifier)
+        await stores.workspace.set(remote_workspace.id, remote_workspace)
         on_forget(archive, position + 1)
     LOGGER.info("forgot version %d on %d archive(s)", version, len(archives))
     return trimmed
@@ -326,15 +329,15 @@ async def _forget_by_version(
 async def _forget_all(
     session: aiohttp.ClientSession,
     archives: list[Archive],
-    workspace: WorkspaceObject,
+    local_workspace: LocalWorkspace,
     on_forget: Callable[[Archive, int | None], None],
-) -> WorkspaceObject:
-    empty = WorkspaceObject()
-    empty_hash = hash_object(empty)
+) -> LocalWorkspace:
+    empty = LocalWorkspace(identifier=local_workspace.identifier)
+    remote_workspace = Workspace(snapshot_ids=set(), id=empty.identifier)
     for archive in archives:
         stores = object_stores(session, archive)
-        await _delete_snapshots(stores, workspace.snapshots)
-        await stores.workspace.set(empty_hash, encode(empty))
+        await _delete_snapshots(stores, local_workspace.snapshots)
+        await stores.workspace.set(remote_workspace.id, remote_workspace)
         on_forget(archive, None)
     LOGGER.info("forgot all versions on %d archive(s)", len(archives))
     return empty
@@ -346,20 +349,19 @@ async def forget_command(
     forget_all: bool,  # noqa: FBT001
     on_forget: Callable[[Archive, int | None], None],
 ) -> None:
-    """Forget the selected version, or all versions, on every active archive."""
     archives = _active_archives(workspace_path)
-    workspace = read_workspace(workspace_path)
-    if not workspace.snapshots:
-        msg = "workspace has no versions"
-        raise EvError(msg)
+    local_workspace = read_workspace(workspace_path)
+    if not local_workspace.snapshots:
+        message = "workspace has no versions"
+        raise EvError(message)
     async with aiohttp.ClientSession() as session:
         if forget_all:
-            result = await _forget_all(session, archives, workspace, on_forget)
+            result = await _forget_all(session, archives, local_workspace, on_forget)
         elif version is not None:
             result = await _forget_by_version(
-                session, archives, workspace, version, on_forget
+                session, archives, local_workspace, version, on_forget
             )
         else:
-            msg_0 = "choose --version or --all"
-            raise EvError(msg_0)
+            message_0 = "choose --version or --all"
+            raise EvError(message_0)
     write_workspace(workspace_path, result)

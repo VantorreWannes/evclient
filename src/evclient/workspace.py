@@ -4,9 +4,10 @@ from typing import TYPE_CHECKING
 from evclient.types import (
     Archive,
     EvError,
-    WorkspaceObject,
-    decode,
-    encode,
+    LocalWorkspace,
+    decode_json,
+    encode_json,
+    new_workspace_identifier,
 )
 
 if TYPE_CHECKING:
@@ -24,7 +25,6 @@ def _config(workspace_path: Path, name: str) -> Path:
 
 
 def read_archives(workspace_path: Path) -> list[Archive]:
-    """Read the active archives, one `<archive:URL> <user:ID>` line each."""
     path = _config(workspace_path, ARCHIVES_FILE)
     if not path.exists():
         LOGGER.debug("no %s for %s", ARCHIVES_FILE, workspace_path)
@@ -36,15 +36,14 @@ def read_archives(workspace_path: Path) -> list[Archive]:
         try:
             url, user_id = line.split()
         except ValueError as error:
-            msg = f"corrupt {ARCHIVES_FILE} line {number + 1}: {line!r}"
-            raise EvError(msg) from error
+            message = f"corrupt {ARCHIVES_FILE} line {number + 1}: {line!r}"
+            raise EvError(message) from error
         archives.append(Archive(url=url, user_id=user_id))
     LOGGER.debug("read %d archive(s) from %s", len(archives), path)
     return archives
 
 
 def write_archives(workspace_path: Path, archives: list[Archive]) -> None:
-    """Write the active archives, one `<archive:URL> <user:ID>` line each."""
     path = _config(workspace_path, ARCHIVES_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = "".join(f"{archive.url} {archive.user_id}\n" for archive in archives)
@@ -52,27 +51,24 @@ def write_archives(workspace_path: Path, archives: list[Archive]) -> None:
     LOGGER.debug("wrote %d archive(s) to %s", len(archives), path)
 
 
-def read_workspace(workspace_path: Path) -> WorkspaceObject:
-    """Read the local workspace container; empty when never saved."""
+def read_workspace(workspace_path: Path) -> LocalWorkspace:
     path = _config(workspace_path, WORKSPACE_FILE)
     if not path.exists():
         LOGGER.debug("no %s for %s", WORKSPACE_FILE, workspace_path)
-        return WorkspaceObject()
-    return decode(WorkspaceObject, path.read_bytes())
+        return LocalWorkspace(identifier=new_workspace_identifier())
+    return decode_json(LocalWorkspace, path.read_bytes())
 
 
-def write_workspace(workspace_path: Path, workspace: WorkspaceObject) -> None:
-    """Write the local workspace container."""
+def write_workspace(workspace_path: Path, workspace: LocalWorkspace) -> None:
     path = _config(workspace_path, WORKSPACE_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(encode(workspace))
+    path.write_bytes(encode_json(workspace))
     LOGGER.debug(
         "wrote workspace (%d snapshot(s)) to %s", len(workspace.snapshots), path
     )
 
 
 def write_file(workspace_path: Path, relative_path: str, data: bytes) -> None:
-    """Materialize one file of a version inside a workspace tree."""
     path = workspace_path / relative_path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
@@ -84,7 +80,6 @@ def _is_hidden(path: Path) -> bool:
 
 
 def scan_files(workspace_path: Path) -> list[tuple[str, bytes]]:
-    """Collect (posix path, bytes) for every non-hidden workspace file."""
     files = [
         (relative.as_posix(), path.read_bytes())
         for path in sorted(workspace_path.rglob("*"))

@@ -9,7 +9,8 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "aiohttp>=3.14.3",
-    "blake3>=1.0.9",
+    "dill>=0.4.1",
+    "evserver",
     "pydantic>=2.13.4",
 ]
 
@@ -27,6 +28,9 @@ ignore = ["D203", "D213", "COM812", "ISC001", "CPY001", "D419", "D100", "D101", 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]
 "tests/unit/**" = ["SLF001"]
+
+[tool.uv.sources]
+evserver = { path = "../evserver", editable = true }
 
 [dependency-groups]
 dev = [
