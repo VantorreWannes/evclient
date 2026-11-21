@@ -2,6 +2,9 @@ from dataclasses import dataclass
 from hashlib import sha3_512
 from pathlib import Path
 
+from pydantic import ConfigDict
+from pydantic.dataclasses import dataclass as pydantic_dataclass
+
 type Id = str
 type UserId = Id
 type WorkspaceId = Id
@@ -20,7 +23,11 @@ class User:
     id: UserId
 
 
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(
+    frozen=True,
+    slots=True,
+    config=ConfigDict(ser_json_bytes="base64", val_json_bytes="base64"),
+)
 class Content:
     data: bytes
 

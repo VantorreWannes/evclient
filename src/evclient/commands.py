@@ -77,27 +77,43 @@ class Remote:
 
     @property
     def user(self) -> Archive[User]:
-        return Archive(session=self.session, domain=f"{self.base_url}/user")
+        return Archive(
+            session=self.session, domain=f"{self.base_url}/user", model=User
+        )
 
     @property
     def workspace(self) -> Archive[RemoteWorkspace]:
-        return Archive(session=self.session, domain=f"{self.base_url}/workspace")
+        return Archive(
+            session=self.session,
+            domain=f"{self.base_url}/workspace",
+            model=RemoteWorkspace,
+        )
 
     @property
     def snapshot(self) -> Archive[Snapshot]:
-        return Archive(session=self.session, domain=f"{self.base_url}/snapshot")
+        return Archive(
+            session=self.session, domain=f"{self.base_url}/snapshot", model=Snapshot
+        )
 
     @property
     def manifest(self) -> Archive[Manifest]:
-        return Archive(session=self.session, domain=f"{self.base_url}/manifest")
+        return Archive(
+            session=self.session, domain=f"{self.base_url}/manifest", model=Manifest
+        )
 
     @property
     def reference(self) -> Archive[Reference]:
-        return Archive(session=self.session, domain=f"{self.base_url}/reference")
+        return Archive(
+            session=self.session,
+            domain=f"{self.base_url}/reference",
+            model=Reference,
+        )
 
     @property
     def content(self) -> Archive[Content]:
-        return Archive(session=self.session, domain=f"{self.base_url}/content")
+        return Archive(
+            session=self.session, domain=f"{self.base_url}/content", model=Content
+        )
 
     async def update_workspace(self, state: WorkspaceState) -> None:
         remote_workspace = RemoteWorkspace(
