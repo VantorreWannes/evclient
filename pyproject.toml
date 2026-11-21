@@ -8,12 +8,14 @@ requires-python = ">=3.14"
 dependencies = [
     "aiohttp>=3.14.4",
     "dill>=0.4.1",
-    "evserver",
     "pydantic>=2.13.4",
 ]
 
 [project.scripts]
 ev = "evclient.cli:main"
+
+[project.gui-scripts]
+ev-gui = "evclient.gui:main"
 
 [build-system]
 requires = ["uv_build>=0.11.32,<0.12.0"]
@@ -23,4 +25,4 @@ build-backend = "uv_build"
 evserver = { path = "../evserver", editable = true }
 
 [dependency-groups]
-dev = ["pytest>=9.1.1", "ruff>=0.16.0", "ty>=0.0.64"]
+dev = ["evserver", "pytest>=9.1.1", "ruff>=0.16.0", "ty>=0.0.64"]
