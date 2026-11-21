@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -47,6 +48,7 @@ from evclient.workspace import Account, Workspace
 
 DEFAULT_ARCHIVE_URL = "https://easyversionarchive.com"
 REGISTRY_PATH = Path.home() / ".ev" / "gui_workspaces.json"
+ACCOUNTS_REGISTRY_PATH = Path.home() / ".ev" / "gui_accounts.json"
 
 STYLESHEET = """
 QMainWindow, QDialog, QWidget {
@@ -65,7 +67,7 @@ QListWidget::item:selected, QTableWidget::item:selected {
     background-color: #2563eb;
     color: #ffffff;
 }
-QLineEdit {
+QLineEdit, QComboBox {
     background-color: #1e222a;
     color: #e5e7eb;
     border: 1px solid #323947;
@@ -165,6 +167,36 @@ class WorkspaceRegistry:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         encoded = TypeAdapter(list[str]).dump_json([str(path) for path in paths])
         self._path.write_bytes(encoded)
+
+
+class AccountRegistry:
+    def __init__(self, path: Path = ACCOUNTS_REGISTRY_PATH) -> None:
+        self._path = path
+
+    def load(self) -> list[Account]:
+        if not self._path.exists():
+            return []
+        try:
+            return TypeAdapter(list[Account]).validate_json(self._path.read_bytes())
+        except (OSError, ValueError):
+            return []
+
+    def save(self, accounts: list[Account]) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = TypeAdapter(list[Account]).dump_json(accounts)
+        self._path.write_bytes(encoded)
+
+    def remember(self, account: Account) -> None:
+        accounts = self.load()
+        if account not in accounts:
+            accounts.append(account)
+            self.save(accounts)
+
+    def forget(self, account: Account) -> None:
+        accounts = self.load()
+        if account in accounts:
+            accounts.remove(account)
+            self.save(accounts)
 
 
 class _WorkerThread(QThread):
@@ -331,17 +363,27 @@ class WorkspaceSidebar(QWidget):
 
 
 class AccountDialog(QDialog):
-    def __init__(self, parent: QWidget) -> None:
+    def __init__(self, parent: QWidget, known_accounts: list[Account]) -> None:
         super().__init__(parent)
         self.setWindowTitle("Add Archive Account")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(440)
         self.mode: str = "login"
+        self._known_accounts = known_accounts
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self._url_input = QLineEdit(DEFAULT_ARCHIVE_URL)
         self._user_input = QLineEdit()
         self._user_input.setPlaceholderText("Leave blank to generate on Register")
+
+        if self._known_accounts:
+            self._saved_combo = QComboBox()
+            self._saved_combo.addItem("New account...")
+            for account in self._known_accounts:
+                self._saved_combo.addItem(f"{account.user_id} @ {account.url}")
+            self._saved_combo.currentIndexChanged.connect(self._on_saved_selected)
+            form.addRow("Saved Account", self._saved_combo)
+
         form.addRow("Archive URL", self._url_input)
         form.addRow("User ID", self._user_input)
         layout.addLayout(form)
@@ -359,6 +401,18 @@ class AccountDialog(QDialog):
         buttons.addWidget(login_button)
         buttons.addWidget(register_button)
         layout.addLayout(buttons)
+
+        if self._known_accounts:
+            self._saved_combo.setCurrentIndex(1)
+
+    def _on_saved_selected(self, index: int) -> None:
+        if index <= 0:
+            self._url_input.setText(DEFAULT_ARCHIVE_URL)
+            self._user_input.clear()
+            return
+        account = self._known_accounts[index - 1]
+        self._url_input.setText(account.url)
+        self._user_input.setText(account.user_id)
 
     def url(self) -> str:
         return self._url_input.text().strip()
@@ -554,6 +608,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("EasyVersion")
         self.resize(920, 580)
+        self._account_registry = AccountRegistry()
 
         self._runner = AsyncRunner(
             self,
@@ -623,16 +678,24 @@ class MainWindow(QMainWindow):
 
         self._tabs.setEnabled(True)
         self._workspace_title.setText(path.name or str(path))
-        self._workspace_subtitle.setText(str(path))
         try:
             accounts = Workspace(path=path.expanduser().resolve()).accounts()
         except EvError as error:
+            self._workspace_subtitle.setText(str(path))
             self._archives_tab.set_accounts([])
             self._tabs.setTabText(1, "Archives (0)")
             self._versions_tab.clear()
             self.statusBar().showMessage(str(error))
             return
 
+        for account in accounts:
+            self._account_registry.remember(account)
+        account_summary = (
+            ", ".join(f"{item.user_id} @ {item.url}" for item in accounts)
+            if accounts
+            else "No active archives"
+        )
+        self._workspace_subtitle.setText(f"{path}  |  {account_summary}")
         self._archives_tab.set_accounts(accounts)
         self._tabs.setTabText(1, f"Archives ({len(accounts)})")
         if not accounts:
@@ -745,7 +808,7 @@ class MainWindow(QMainWindow):
         path = self._sidebar.current_path()
         if path is None:
             return
-        dialog = AccountDialog(self)
+        dialog = AccountDialog(self, self._account_registry.load())
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         url = dialog.url()
@@ -753,12 +816,16 @@ class MainWindow(QMainWindow):
 
         if dialog.mode == "login":
             account = login(path, url, raw_user)
+            self._account_registry.remember(account)
             self._on_workspace_selected(path)
-            self.statusBar().showMessage(f"Logged in {account.user_id} @ {account.url}")
+            self.statusBar().showMessage(
+                f"Logged in {account.user_id} @ {account.url}"
+            )
             return
 
         def on_registered(created_id: UserId) -> None:
             account = login(path, url, created_id)
+            self._account_registry.remember(account)
             self._on_workspace_selected(path)
             self.statusBar().showMessage(
                 f"Registered and logged in {account.user_id} @ {account.url}"
@@ -788,6 +855,7 @@ class MainWindow(QMainWindow):
 
         def on_done(_: None) -> None:
             logout(path, account.url, account.user_id)
+            self._account_registry.forget(account)
             self._on_workspace_selected(path)
             self.statusBar().showMessage(
                 f"Unregistered {account.user_id} from {account.url}"
