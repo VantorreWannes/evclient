@@ -1,9 +1,31 @@
 import asyncio
-import threading
-import tkinter as tk
 from collections.abc import Callable, Coroutine
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+
+from pydantic import TypeAdapter
+from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from evclient.commands import (
     CloneResult,
@@ -21,377 +43,766 @@ from evclient.commands import (
     unregister,
 )
 from evclient.types import EvError, UserId
+from evclient.workspace import Account, Workspace
+
+DEFAULT_ARCHIVE_URL = "https://easyversionarchive.com"
+REGISTRY_PATH = Path.home() / ".ev" / "gui_workspaces.json"
+
+STYLESHEET = """
+QMainWindow, QDialog, QWidget {
+    background-color: #16181d;
+    color: #e5e7eb;
+}
+QListWidget, QTableWidget {
+    background-color: #1e222a;
+    color: #e5e7eb;
+    border: 1px solid #2d3340;
+    border-radius: 6px;
+    outline: none;
+    gridline-color: #262b36;
+}
+QListWidget::item:selected, QTableWidget::item:selected {
+    background-color: #2563eb;
+    color: #ffffff;
+}
+QLineEdit {
+    background-color: #1e222a;
+    color: #e5e7eb;
+    border: 1px solid #323947;
+    border-radius: 6px;
+    padding: 6px 10px;
+}
+QLineEdit:focus {
+    border-color: #3b82f6;
+}
+QPushButton {
+    background-color: #232833;
+    color: #e5e7eb;
+    border: 1px solid #353c4b;
+    border-radius: 6px;
+    padding: 6px 14px;
+}
+QPushButton:hover {
+    background-color: #2d3442;
+}
+QPushButton:disabled {
+    color: #6b7280;
+    background-color: #1b1e25;
+    border-color: #262b35;
+}
+QPushButton#primary {
+    background-color: #2563eb;
+    border-color: #2563eb;
+    color: #ffffff;
+    font-weight: 600;
+}
+QPushButton#primary:hover {
+    background-color: #1d4ed8;
+}
+QPushButton#danger {
+    color: #f87171;
+    border-color: #5c2b2e;
+    background-color: #261c1e;
+}
+QPushButton#danger:hover {
+    background-color: #3b2326;
+}
+QPushButton#danger:disabled {
+    color: #6b7280;
+    background-color: #1b1e25;
+    border-color: #262b35;
+}
+QTabWidget::pane {
+    border: 1px solid #2d3340;
+    border-radius: 6px;
+    background-color: #1a1d24;
+    padding: 8px;
+}
+QTabBar::tab {
+    background-color: #1e222a;
+    color: #9ca3af;
+    border: 1px solid #2d3340;
+    border-bottom: none;
+    padding: 6px 14px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    margin-right: 4px;
+}
+QTabBar::tab:selected {
+    background-color: #1a1d24;
+    color: #f3f4f6;
+    font-weight: 600;
+}
+QHeaderView::section {
+    background-color: #232833;
+    color: #cbd5e1;
+    border: none;
+    border-bottom: 1px solid #2d3340;
+    padding: 6px 8px;
+    font-weight: 600;
+}
+QStatusBar {
+    background-color: #16181d;
+    color: #9ca3af;
+}
+"""
 
 
-def _require_non_empty(variable: tk.StringVar, field_name: str) -> str:
-    value = variable.get().strip()
-    if not value:
-        message = f"{field_name} is required"
-        raise EvError(message)
-    return value
+class WorkspaceRegistry:
+    def __init__(self, path: Path = REGISTRY_PATH) -> None:
+        self._path = path
+
+    def load(self) -> list[Path]:
+        if not self._path.exists():
+            return []
+        try:
+            raw = TypeAdapter(list[str]).validate_json(self._path.read_bytes())
+        except OSError, ValueError:
+            return []
+        return [Path(item) for item in raw if Path(item).exists()]
+
+    def save(self, paths: list[Path]) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = TypeAdapter(list[str]).dump_json([str(path) for path in paths])
+        self._path.write_bytes(encoded)
 
 
-class AsyncRunner:
+class _WorkerThread(QThread):
     def __init__(
         self,
-        root: tk.Tk,
+        coroutine_factory: Callable[[], Coroutine[object, object, object]],
+        on_succeeded: Callable[[object], None],
+        on_failed: Callable[[EvError], None],
+    ) -> None:
+        super().__init__()
+        self._coroutine_factory = coroutine_factory
+        self._on_succeeded = on_succeeded
+        self._on_failed = on_failed
+
+    def run(self) -> None:
+        try:
+            result = asyncio.run(self._coroutine_factory())
+        except EvError as error:
+            self._on_failed(error)
+        else:
+            self._on_succeeded(result)
+
+
+class AsyncRunner(QObject):
+    _deliver_success = Signal(object, object)
+    _deliver_error = Signal(object, object)
+
+    def __init__(
+        self,
+        parent: QObject,
         on_start: Callable[[], None],
         on_error: Callable[[EvError], None],
     ) -> None:
-        self._root = root
+        super().__init__(parent)
         self._on_start = on_start
         self._on_error = on_error
+        self._threads: list[_WorkerThread] = []
+        self._deliver_success.connect(
+            self._handle_success, Qt.ConnectionType.QueuedConnection
+        )
+        self._deliver_error.connect(
+            self._handle_error, Qt.ConnectionType.QueuedConnection
+        )
+
+    @Slot(object, object)
+    def _handle_success(
+        self, callback: Callable[[object], None], result: object
+    ) -> None:
+        callback(result)
+
+    @Slot(object, object)
+    def _handle_error(
+        self, callback: Callable[[EvError], None], error: EvError
+    ) -> None:
+        callback(error)
 
     def run[T](
         self,
         coroutine_factory: Callable[[], Coroutine[object, object, T]],
         on_success: Callable[[T], None],
+        *,
+        on_error: Callable[[EvError], None] | None = None,
     ) -> None:
         self._on_start()
-
-        def worker() -> None:
-            try:
-                result = asyncio.run(coroutine_factory())
-            except EvError as error:
-                self._root.after(0, self._on_error, error)
-            else:
-                self._root.after(0, on_success, result)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-
-class WorkspaceBar(ttk.Frame):
-    def __init__(self, master: tk.Misc) -> None:
-        super().__init__(master)
-        self.columnconfigure(1, weight=1)
-        self._path_variable = tk.StringVar(value=str(Path.cwd()))
-
-        ttk.Label(self, text="Workspace").grid(row=0, column=0, sticky=tk.W, pady=4)
-        ttk.Entry(self, textvariable=self._path_variable).grid(
-            row=0, column=1, sticky=tk.EW, padx=6, pady=4
+        error_handler = on_error or self._on_error
+        worker = _WorkerThread(
+            coroutine_factory,
+            lambda result: self._deliver_success.emit(on_success, result),
+            lambda error: self._deliver_error.emit(error_handler, error),
         )
-        ttk.Button(self, text="Browse...", command=self._browse).grid(
-            row=0, column=2, sticky=tk.E, pady=4
+        self._threads.append(worker)
+
+        worker.finished.connect(
+            lambda: self._cleanup(worker), Qt.ConnectionType.QueuedConnection
         )
+        worker.start()
 
-    def path(self) -> Path:
-        return Path(_require_non_empty(self._path_variable, "workspace path"))
+    def _cleanup(self, worker: _WorkerThread) -> None:
+        if worker in self._threads:
+            self._threads.remove(worker)
+        worker.deleteLater()
 
-    def _browse(self) -> None:
-        chosen = filedialog.askdirectory(initialdir=self._path_variable.get())
+
+class WorkspaceSidebar(QWidget):
+    workspace_selected = Signal(object)
+
+    def __init__(self, registry: WorkspaceRegistry) -> None:
+        super().__init__()
+        self._registry = registry
+        self._paths: list[Path] = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 8, 0)
+
+        title = QLabel("Workspaces")
+        title.setStyleSheet("font-weight: 600; font-size: 14px;")
+        layout.addWidget(title)
+
+        self._list = QListWidget()
+        self._list.currentRowChanged.connect(self._on_row_changed)
+        layout.addWidget(self._list, 1)
+
+        buttons = QHBoxLayout()
+        add_button = QPushButton("+ Add")
+        add_button.clicked.connect(self._add_folder)
+        remove_button = QPushButton("- Remove")
+        remove_button.clicked.connect(self._remove_selected)
+        buttons.addWidget(add_button)
+        buttons.addWidget(remove_button)
+        layout.addLayout(buttons)
+
+        self._load_initial()
+
+    def current_path(self) -> Path | None:
+        row = self._list.currentRow()
+        if row < 0 or row >= len(self._paths):
+            return None
+        return self._paths[row]
+
+    def add_workspace(self, path: Path) -> None:
+        resolved = path.expanduser().resolve()
+        if resolved not in self._paths:
+            self._paths.append(resolved)
+            self._registry.save(self._paths)
+            self._append_item(resolved)
+        self._list.setCurrentRow(self._paths.index(resolved))
+
+    def _load_initial(self) -> None:
+        saved = self._registry.load()
+        if not saved:
+            saved = [Path.cwd()]
+        self._paths = saved
+        for path in self._paths:
+            self._append_item(path)
+        self._registry.save(self._paths)
+        if self._paths:
+            self._list.setCurrentRow(0)
+
+    def _append_item(self, path: Path) -> None:
+        item = QListWidgetItem(path.name or str(path))
+        item.setToolTip(str(path))
+        self._list.addItem(item)
+
+    def _on_row_changed(self, row: int) -> None:
+        if 0 <= row < len(self._paths):
+            self.workspace_selected.emit(self._paths[row])
+        else:
+            self.workspace_selected.emit(None)
+
+    def _add_folder(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Select Workspace Folder", str(Path.cwd())
+        )
         if chosen:
-            self._path_variable.set(chosen)
+            self.add_workspace(Path(chosen))
+
+    def _remove_selected(self) -> None:
+        row = self._list.currentRow()
+        if row < 0 or row >= len(self._paths):
+            return
+        self._paths.pop(row)
+        self._list.takeItem(row)
+        self._registry.save(self._paths)
 
 
-class AccountPanel(ttk.LabelFrame):
-    def __init__(
-        self,
-        master: tk.Misc,
-        on_register: Callable[[], None],
-        on_unregister: Callable[[], None],
-        on_login: Callable[[], None],
-        on_logout: Callable[[], None],
-    ) -> None:
-        super().__init__(master, text="Archive Account", padding=8)
-        self.columnconfigure(1, weight=1)
-        self.columnconfigure(3, weight=1)
-        self._url_variable = tk.StringVar()
-        self._user_variable = tk.StringVar()
+class AccountDialog(QDialog):
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Add Archive Account")
+        self.setMinimumWidth(420)
+        self.mode: str = "login"
 
-        ttk.Label(self, text="URL").grid(row=0, column=0, sticky=tk.W)
-        ttk.Entry(self, textvariable=self._url_variable).grid(
-            row=0, column=1, sticky=tk.EW, padx=(6, 12)
-        )
-        ttk.Label(self, text="User").grid(row=0, column=2, sticky=tk.W)
-        ttk.Entry(self, textvariable=self._user_variable).grid(
-            row=0, column=3, sticky=tk.EW, padx=6
-        )
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self._url_input = QLineEdit(DEFAULT_ARCHIVE_URL)
+        self._user_input = QLineEdit()
+        self._user_input.setPlaceholderText("Leave blank to generate on Register")
+        form.addRow("Archive URL", self._url_input)
+        form.addRow("User ID", self._user_input)
+        layout.addLayout(form)
 
-        buttons = ttk.Frame(self)
-        buttons.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
-        ttk.Button(buttons, text="Register", command=on_register).pack(
-            side=tk.LEFT, padx=(0, 6)
-        )
-        ttk.Button(buttons, text="Unregister", command=on_unregister).pack(
-            side=tk.LEFT, padx=(0, 6)
-        )
-        ttk.Button(buttons, text="Login", command=on_login).pack(
-            side=tk.LEFT, padx=(0, 6)
-        )
-        ttk.Button(buttons, text="Logout", command=on_logout).pack(side=tk.LEFT)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        login_button = QPushButton("Login")
+        login_button.clicked.connect(lambda: self._accept_mode("login"))
+        register_button = QPushButton("Register && Login")
+        register_button.setObjectName("primary")
+        register_button.clicked.connect(lambda: self._accept_mode("register"))
+        buttons.addWidget(cancel_button)
+        buttons.addWidget(login_button)
+        buttons.addWidget(register_button)
+        layout.addLayout(buttons)
 
     def url(self) -> str:
-        return _require_non_empty(self._url_variable, "archive URL")
+        return self._url_input.text().strip()
 
     def user_id(self) -> UserId:
-        return _require_non_empty(self._user_variable, "user ID")
+        return self._user_input.text().strip()
 
-    def optional_user_id(self) -> UserId | None:
-        return self._user_variable.get().strip() or None
+    def _accept_mode(self, mode: str) -> None:
+        if not self.url():
+            QMessageBox.warning(self, "EasyVersion", "Archive URL is required.")
+            return
+        if mode == "login" and not self.user_id():
+            QMessageBox.warning(self, "EasyVersion", "User ID is required for Login.")
+            return
+        self.mode = mode
+        self.accept()
 
-    def set_user_id(self, user_id: UserId) -> None:
-        self._user_variable.set(user_id)
 
+class VersionsTab(QWidget):
+    save_requested = Signal(object)
+    refresh_requested = Signal()
+    clone_requested = Signal(object)
+    forget_requested = Signal(int)
+    forget_all_requested = Signal()
 
-class VersionPanel(ttk.Frame):
-    def __init__(
-        self,
-        master: tk.Misc,
-        on_save: Callable[[], None],
-        on_refresh: Callable[[], None],
-        on_clone: Callable[[], None],
-        on_forget_selected: Callable[[], None],
-        on_forget_all: Callable[[], None],
-    ) -> None:
-        super().__init__(master)
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
-        self._note_variable = tk.StringVar()
+    def __init__(self) -> None:
+        super().__init__()
         self._versions: list[int] = []
 
-        actions = ttk.Frame(self)
-        actions.grid(row=0, column=0, sticky=tk.EW, pady=(0, 6))
-        actions.columnconfigure(1, weight=1)
+        layout = QVBoxLayout(self)
+        top_bar = QHBoxLayout()
+        self._note_input = QLineEdit()
+        self._note_input.setPlaceholderText("Version note (optional)...")
+        self._note_input.returnPressed.connect(self._emit_save)
+        save_button = QPushButton("Save Version")
+        save_button.setObjectName("primary")
+        save_button.clicked.connect(self._emit_save)
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self.refresh_requested.emit)
+        top_bar.addWidget(self._note_input, 1)
+        top_bar.addWidget(save_button)
+        top_bar.addWidget(refresh_button)
+        layout.addLayout(top_bar)
 
-        ttk.Label(actions, text="Note").grid(row=0, column=0, sticky=tk.W)
-        ttk.Entry(actions, textvariable=self._note_variable).grid(
-            row=0, column=1, sticky=tk.EW, padx=6
-        )
-        ttk.Button(actions, text="Save", command=on_save).grid(
-            row=0, column=2, padx=(0, 6)
-        )
-        ttk.Button(actions, text="Refresh", command=on_refresh).grid(
-            row=0, column=3, padx=(0, 6)
-        )
-        ttk.Button(actions, text="Clone...", command=on_clone).grid(
-            row=0, column=4, padx=(0, 6)
-        )
-        ttk.Button(actions, text="Forget Selected", command=on_forget_selected).grid(
-            row=0, column=5, padx=(0, 6)
-        )
-        ttk.Button(actions, text="Forget All", command=on_forget_all).grid(
-            row=0, column=6
-        )
+        self._table = QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels(["#", "Note", "Snapshot"])
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.itemSelectionChanged.connect(self._update_buttons)
+        layout.addWidget(self._table, 1)
 
-        self._listbox = tk.Listbox(self, exportselection=False)
-        self._listbox.grid(row=1, column=0, sticky=tk.NSEW)
-
-    def note(self) -> str | None:
-        return self._note_variable.get().strip() or None
-
-    def clear_note(self) -> None:
-        self._note_variable.set("")
+        bottom_bar = QHBoxLayout()
+        self._clone_button = QPushButton("Clone Latest...")
+        self._clone_button.clicked.connect(
+            lambda: self.clone_requested.emit(self.selected_version())
+        )
+        self._forget_button = QPushButton("Forget Selected")
+        self._forget_button.setObjectName("danger")
+        self._forget_button.clicked.connect(self._emit_forget)
+        self._forget_all_button = QPushButton("Forget All")
+        self._forget_all_button.setObjectName("danger")
+        self._forget_all_button.clicked.connect(self.forget_all_requested.emit)
+        bottom_bar.addWidget(self._clone_button)
+        bottom_bar.addStretch(1)
+        bottom_bar.addWidget(self._forget_button)
+        bottom_bar.addWidget(self._forget_all_button)
+        layout.addLayout(bottom_bar)
+        self._update_buttons()
 
     def selected_version(self) -> int | None:
-        selection = self._listbox.curselection()
-        if not selection:
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._versions):
             return None
-        return self._versions[selection[0]]
+        return self._versions[row]
 
     def set_listings(self, listings: tuple[VersionListing, ...]) -> None:
         self.clear()
-        for listing in listings:
-            suffix = f" -- {listing.note}" if listing.note else ""
-            self._listbox.insert(
-                tk.END, f"{listing.number}: {listing.identifier}{suffix}"
-            )
+        ordered = list(reversed(listings))
+        self._table.setRowCount(len(ordered))
+        for row, listing in enumerate(ordered):
+            number_item = QTableWidgetItem(str(listing.number))
+            number_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._table.setItem(row, 0, number_item)
+            self._table.setItem(row, 1, QTableWidgetItem(listing.note or ""))
+            self._table.setItem(row, 2, QTableWidgetItem(listing.identifier[:16]))
             self._versions.append(listing.number)
+        self._update_buttons()
+
+    def clear_note(self) -> None:
+        self._note_input.clear()
 
     def clear(self) -> None:
-        self._listbox.delete(0, tk.END)
+        self._table.setRowCount(0)
         self._versions = []
+        self._update_buttons()
+
+    def _emit_save(self) -> None:
+        note = self._note_input.text().strip() or None
+        self.save_requested.emit(note)
+
+    def _emit_forget(self) -> None:
+        version = self.selected_version()
+        if version is not None:
+            self.forget_requested.emit(version)
+
+    def _update_buttons(self) -> None:
+        selected = self.selected_version()
+        has_versions = bool(self._versions)
+        self._clone_button.setEnabled(has_versions)
+        self._clone_button.setText(
+            f"Clone v{selected}..." if selected is not None else "Clone Latest..."
+        )
+        self._forget_button.setEnabled(selected is not None)
+        self._forget_all_button.setEnabled(has_versions)
 
 
-class Application:
-    def __init__(self, root: tk.Tk) -> None:
-        root.title("EasyVersion")
-        root.minsize(640, 440)
+class ArchivesTab(QWidget):
+    add_requested = Signal()
+    logout_requested = Signal(object)
+    unregister_requested = Signal(object)
 
-        self._status_variable = tk.StringVar(value="Ready")
+    def __init__(self) -> None:
+        super().__init__()
+        self._accounts: list[Account] = []
+
+        layout = QVBoxLayout(self)
+        self._table = QTableWidget(0, 2)
+        self._table.setHorizontalHeaderLabels(["Archive URL", "User ID"])
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.itemSelectionChanged.connect(self._update_buttons)
+        layout.addWidget(self._table, 1)
+
+        buttons = QHBoxLayout()
+        add_button = QPushButton("+ Add Archive...")
+        add_button.setObjectName("primary")
+        add_button.clicked.connect(self.add_requested.emit)
+        self._logout_button = QPushButton("Logout")
+        self._logout_button.clicked.connect(self._emit_logout)
+        self._unregister_button = QPushButton("Unregister")
+        self._unregister_button.setObjectName("danger")
+        self._unregister_button.clicked.connect(self._emit_unregister)
+        buttons.addWidget(add_button)
+        buttons.addStretch(1)
+        buttons.addWidget(self._logout_button)
+        buttons.addWidget(self._unregister_button)
+        layout.addLayout(buttons)
+        self._update_buttons()
+
+    def set_accounts(self, accounts: list[Account]) -> None:
+        self._accounts = list(accounts)
+        self._table.setRowCount(len(self._accounts))
+        for row, account in enumerate(self._accounts):
+            self._table.setItem(row, 0, QTableWidgetItem(account.url))
+            self._table.setItem(row, 1, QTableWidgetItem(account.user_id))
+        self._update_buttons()
+
+    def _selected_account(self) -> Account | None:
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._accounts):
+            return None
+        return self._accounts[row]
+
+    def _emit_logout(self) -> None:
+        account = self._selected_account()
+        if account is not None:
+            self.logout_requested.emit(account)
+
+    def _emit_unregister(self) -> None:
+        account = self._selected_account()
+        if account is not None:
+            self.unregister_requested.emit(account)
+
+    def _update_buttons(self) -> None:
+        has_selection = self._selected_account() is not None
+        self._logout_button.setEnabled(has_selection)
+        self._unregister_button.setEnabled(has_selection)
+
+
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("EasyVersion")
+        self.resize(920, 580)
+
         self._runner = AsyncRunner(
-            root,
-            on_start=lambda: self._status_variable.set("Working..."),
+            self,
+            on_start=lambda: self.statusBar().showMessage("Working..."),
             on_error=self._show_error,
         )
 
-        container = ttk.Frame(root, padding=12)
-        container.pack(fill=tk.BOTH, expand=True)
-        container.columnconfigure(0, weight=1)
-        container.rowconfigure(2, weight=1)
+        root_widget = QWidget()
+        self.setCentralWidget(root_widget)
+        outer = QVBoxLayout(root_widget)
+        outer.setContentsMargins(12, 12, 12, 8)
 
-        self._workspace_bar = WorkspaceBar(container)
-        self._workspace_bar.grid(row=0, column=0, sticky=tk.EW)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        outer.addWidget(splitter, 1)
 
-        self._account_panel = AccountPanel(
-            container,
-            on_register=self._register,
-            on_unregister=self._unregister,
-            on_login=self._login,
-            on_logout=self._logout,
-        )
-        self._account_panel.grid(row=1, column=0, sticky=tk.EW, pady=6)
+        self._sidebar = WorkspaceSidebar(WorkspaceRegistry())
+        self._sidebar.setMinimumWidth(190)
+        splitter.addWidget(self._sidebar)
 
-        self._version_panel = VersionPanel(
-            container,
-            on_save=self._save,
-            on_refresh=self._refresh,
-            on_clone=self._clone,
-            on_forget_selected=self._forget_selected,
-            on_forget_all=self._forget_all,
-        )
-        self._version_panel.grid(row=2, column=0, sticky=tk.NSEW, pady=6)
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(8, 0, 0, 0)
 
-        ttk.Label(container, textvariable=self._status_variable).grid(
-            row=3, column=0, sticky=tk.W
-        )
+        self._workspace_title = QLabel("No workspace selected")
+        self._workspace_title.setStyleSheet("font-weight: 600; font-size: 16px;")
+        self._workspace_subtitle = QLabel("")
+        self._workspace_subtitle.setStyleSheet("color: #64748b;")
+        right_layout.addWidget(self._workspace_title)
+        right_layout.addWidget(self._workspace_subtitle)
+
+        self._tabs = QTabWidget()
+        self._versions_tab = VersionsTab()
+        self._archives_tab = ArchivesTab()
+        self._tabs.addTab(self._versions_tab, "Versions")
+        self._tabs.addTab(self._archives_tab, "Archives (0)")
+        right_layout.addWidget(self._tabs, 1)
+
+        splitter.addWidget(right)
+        splitter.setSizes([220, 700])
+
+        self._sidebar.workspace_selected.connect(self._on_workspace_selected)
+        self._versions_tab.save_requested.connect(self._save)
+        self._versions_tab.refresh_requested.connect(lambda: self._refresh(quiet=False))
+        self._versions_tab.clone_requested.connect(self._clone)
+        self._versions_tab.forget_requested.connect(self._forget_version)
+        self._versions_tab.forget_all_requested.connect(self._forget_all)
+        self._archives_tab.add_requested.connect(self._add_archive)
+        self._archives_tab.logout_requested.connect(self._logout)
+        self._archives_tab.unregister_requested.connect(self._unregister)
+
+        self._on_workspace_selected(self._sidebar.current_path())
 
     def _show_error(self, error: EvError) -> None:
-        self._status_variable.set(str(error))
-        messagebox.showerror("EasyVersion", str(error))
+        self.statusBar().showMessage(str(error))
+        QMessageBox.critical(self, "EasyVersion", str(error))
 
-    def _register(self) -> None:
-        try:
-            url = self._account_panel.url()
-        except EvError as error:
-            self._show_error(error)
-            return
-        user_id = self._account_panel.optional_user_id()
-
-        def on_done(created_id: UserId) -> None:
-            self._account_panel.set_user_id(created_id)
-            self._status_variable.set(f"Registered user {created_id}")
-
-        self._runner.run(lambda: register(url, user_id), on_done)
-
-    def _unregister(self) -> None:
-        try:
-            url = self._account_panel.url()
-            user_id = self._account_panel.user_id()
-        except EvError as error:
-            self._show_error(error)
+    def _on_workspace_selected(self, path: Path | None) -> None:
+        if path is None:
+            self._workspace_title.setText("No workspace selected")
+            self._workspace_subtitle.setText("")
+            self._archives_tab.set_accounts([])
+            self._tabs.setTabText(1, "Archives (0)")
+            self._versions_tab.clear()
+            self._tabs.setEnabled(False)
+            self.statusBar().showMessage("Add or select a workspace")
             return
 
-        self._runner.run(
-            lambda: unregister(url, user_id),
-            lambda _: self._status_variable.set(f"Unregistered user {user_id}"),
-        )
-
-    def _login(self) -> None:
+        self._tabs.setEnabled(True)
+        self._workspace_title.setText(path.name or str(path))
+        self._workspace_subtitle.setText(str(path))
         try:
-            account = login(
-                self._workspace_bar.path(),
-                self._account_panel.url(),
-                self._account_panel.user_id(),
+            accounts = Workspace(path=path.expanduser().resolve()).accounts()
+        except EvError as error:
+            self._archives_tab.set_accounts([])
+            self._tabs.setTabText(1, "Archives (0)")
+            self._versions_tab.clear()
+            self.statusBar().showMessage(str(error))
+            return
+
+        self._archives_tab.set_accounts(accounts)
+        self._tabs.setTabText(1, f"Archives ({len(accounts)})")
+        if not accounts:
+            self._versions_tab.clear()
+            self.statusBar().showMessage(
+                "Add an archive in the Archives tab to get started"
             )
-        except EvError as error:
-            self._show_error(error)
             return
-        self._status_variable.set(f"Logged in {account.url} ({account.user_id})")
+        self._refresh(quiet=True)
 
-    def _logout(self) -> None:
-        try:
-            removed = logout(
-                self._workspace_bar.path(),
-                self._account_panel.url(),
-                self._account_panel.user_id(),
-            )
-        except EvError as error:
-            self._show_error(error)
-            return
-        self._status_variable.set("Logged out" if removed else "Account was not active")
-
-    def _save(self) -> None:
-        try:
-            workspace_path = self._workspace_bar.path()
-        except EvError as error:
-            self._show_error(error)
-            return
-        note = self._version_panel.note()
-
-        def on_done(result: SaveResult) -> None:
-            self._version_panel.clear_note()
-            self._status_variable.set(
-                f"Saved version {result.version} to {result.account.url}"
-            )
-            self._refresh()
-
-        self._runner.run(lambda: save(workspace_path, note), on_done)
-
-    def _refresh(self) -> None:
-        try:
-            workspace_path = self._workspace_bar.path()
-        except EvError as error:
-            self._show_error(error)
+    def _refresh(self, *, quiet: bool = False) -> None:
+        path = self._sidebar.current_path()
+        if path is None:
             return
 
         def on_done(result: ListResult) -> None:
-            self._version_panel.set_listings(result.listings)
-            self._status_variable.set(
+            self._versions_tab.set_listings(result.listings)
+            self.statusBar().showMessage(
                 f"Loaded {len(result.listings)} version(s) from {result.account.url}"
             )
 
-        self._runner.run(lambda: list_versions(workspace_path), on_done)
+        def on_quiet_error(error: EvError) -> None:
+            self._versions_tab.clear()
+            self.statusBar().showMessage(str(error))
 
-    def _clone(self) -> None:
-        try:
-            source_path = self._workspace_bar.path()
-        except EvError as error:
-            self._show_error(error)
+        self._runner.run(
+            lambda: list_versions(path),
+            on_done,
+            on_error=on_quiet_error if quiet else None,
+        )
+
+    def _save(self, note: str | None) -> None:
+        path = self._sidebar.current_path()
+        if path is None:
             return
-        parent = filedialog.askdirectory(title="Select parent folder for clone")
-        if not parent:
+
+        def on_done(result: SaveResult) -> None:
+            self._versions_tab.clear_note()
+            self.statusBar().showMessage(
+                f"Saved version {result.version} to {result.account.url}"
+            )
+            self._refresh(quiet=True)
+
+        self._runner.run(lambda: save(path, note), on_done)
+
+    def _clone(self, version: int | None) -> None:
+        source_path = self._sidebar.current_path()
+        if source_path is None:
             return
-        target_path = Path(parent) / f"{source_path.name}-clone"
-        version = self._version_panel.selected_version()
+        target, _ = QFileDialog.getSaveFileName(
+            self,
+            "Clone Workspace As",
+            str(source_path.parent / f"{source_path.name}-clone"),
+        )
+        if not target:
+            return
+        target_path = Path(target)
 
         def on_done(result: CloneResult) -> None:
-            self._status_variable.set(
+            self._sidebar.add_workspace(target_path)
+            self.statusBar().showMessage(
                 f"Cloned {result.first}..{result.last} to {target_path}"
             )
 
         self._runner.run(lambda: clone(source_path, target_path, version), on_done)
 
-    def _forget_selected(self) -> None:
-        version = self._version_panel.selected_version()
-        if version is None:
-            self._show_error(EvError("select a version first"))
+    def _forget_version(self, version: int) -> None:
+        path = self._sidebar.current_path()
+        if path is None:
             return
-        try:
-            workspace_path = self._workspace_bar.path()
-        except EvError as error:
-            self._show_error(error)
+        answer = QMessageBox.question(
+            self,
+            "Forget Version",
+            f"Forget version {version} on all active archives?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
             return
 
         def on_done(result: ForgetResult) -> None:
-            self._status_variable.set(
+            self.statusBar().showMessage(
                 f"Forgot version {result.version} on {len(result.accounts)} archive(s)"
             )
-            self._refresh()
+            self._refresh(quiet=True)
 
         self._runner.run(
-            lambda: forget(workspace_path, version=version, forget_all=False), on_done
+            lambda: forget(path, version=version, forget_all=False), on_done
         )
 
     def _forget_all(self) -> None:
-        try:
-            workspace_path = self._workspace_bar.path()
-        except EvError as error:
-            self._show_error(error)
+        path = self._sidebar.current_path()
+        if path is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Forget All",
+            "Forget ALL versions on all active archives?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
             return
 
         def on_done(result: ForgetResult) -> None:
-            self._version_panel.clear()
-            self._status_variable.set(
+            self._versions_tab.clear()
+            self.statusBar().showMessage(
                 f"Forgot all versions on {len(result.accounts)} archive(s)"
             )
 
-        self._runner.run(lambda: forget(workspace_path, forget_all=True), on_done)
+        self._runner.run(lambda: forget(path, forget_all=True), on_done)
+
+    def _add_archive(self) -> None:
+        path = self._sidebar.current_path()
+        if path is None:
+            return
+        dialog = AccountDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        url = dialog.url()
+        raw_user = dialog.user_id()
+
+        if dialog.mode == "login":
+            account = login(path, url, raw_user)
+            self._on_workspace_selected(path)
+            self.statusBar().showMessage(f"Logged in {account.user_id} @ {account.url}")
+            return
+
+        def on_registered(created_id: UserId) -> None:
+            account = login(path, url, created_id)
+            self._on_workspace_selected(path)
+            self.statusBar().showMessage(
+                f"Registered and logged in {account.user_id} @ {account.url}"
+            )
+
+        self._runner.run(lambda: register(url, raw_user or None), on_registered)
+
+    def _logout(self, account: Account) -> None:
+        path = self._sidebar.current_path()
+        if path is None:
+            return
+        logout(path, account.url, account.user_id)
+        self._on_workspace_selected(path)
+        self.statusBar().showMessage(f"Logged out {account.user_id} @ {account.url}")
+
+    def _unregister(self, account: Account) -> None:
+        path = self._sidebar.current_path()
+        if path is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Unregister",
+            f"Delete user '{account.user_id}' from {account.url}?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        def on_done(_: None) -> None:
+            logout(path, account.url, account.user_id)
+            self._on_workspace_selected(path)
+            self.statusBar().showMessage(
+                f"Unregistered {account.user_id} from {account.url}"
+            )
+
+        self._runner.run(lambda: unregister(account.url, account.user_id), on_done)
 
 
 def main() -> None:
-    root = tk.Tk()
-    Application(root)
-    root.mainloop()
+    app = QApplication([])
+    app.setStyle("Fusion")
+    app.setStyleSheet(STYLESHEET)
+    window = MainWindow()
+    window.show()
+    app.exec()
 
 
 if __name__ == "__main__":

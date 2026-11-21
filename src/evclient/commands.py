@@ -129,10 +129,8 @@ class Remote:
         state: WorkspaceState,
     ) -> None:
         await asyncio.gather(
-            *(self.content.set(item.id, item) for item in collected.contents)
-        )
-        await asyncio.gather(
-            *(self.reference.set(item.id, item) for item in collected.references)
+            *(self.content.set(item.id, item) for item in collected.contents),
+            *(self.reference.set(item.id, item) for item in collected.references),
         )
         await self.manifest.set(collected.manifest.id, collected.manifest)
         await self.snapshot.set(snapshot.id, snapshot)
@@ -168,6 +166,18 @@ class Remote:
         await self.snapshot.delete(snapshot_id)
         return True
 
+    async def _delete_reference(self, reference_id: str) -> None:
+        try:
+            reference = await self.reference.get(reference_id)
+        except ClientResponseError as error:
+            if error.status != HTTPStatus.NOT_FOUND:
+                raise
+            return
+        await asyncio.gather(
+            self.content.delete(reference.content_id),
+            self.reference.delete(reference_id),
+        )
+
     async def _delete_manifest(self, manifest_id: str) -> None:
         try:
             manifest = await self.manifest.get(manifest_id)
@@ -175,15 +185,12 @@ class Remote:
             if error.status != HTTPStatus.NOT_FOUND:
                 raise
             return
-        for reference_id in manifest.reference_ids:
-            try:
-                reference = await self.reference.get(reference_id)
-            except ClientResponseError as error:
-                if error.status != HTTPStatus.NOT_FOUND:
-                    raise
-                continue
-            await self.content.delete(reference.content_id)
-            await self.reference.delete(reference_id)
+        await asyncio.gather(
+            *(
+                self._delete_reference(reference_id)
+                for reference_id in manifest.reference_ids
+            )
+        )
         await self.manifest.delete(manifest_id)
 
     async def forget_version(
@@ -207,8 +214,12 @@ class Remote:
         snapshot_ids: tuple[SnapshotId, ...],
         state: WorkspaceState,
     ) -> None:
-        for snapshot_id in dict.fromkeys(snapshot_ids):
-            await self.delete_snapshot(snapshot_id)
+        await asyncio.gather(
+            *(
+                self.delete_snapshot(snapshot_id)
+                for snapshot_id in dict.fromkeys(snapshot_ids)
+            )
+        )
         await self.update_workspace(state)
 
 
@@ -277,21 +288,22 @@ async def _try_all(
     accounts: list[Account],
     action: Callable[[Remote, Account], Awaitable[None]],
 ) -> list[Account]:
-    succeeded: list[Account] = []
-    last_error: Exception | None = None
-    for account in accounts:
+    async def run_one(account: Account) -> Account | Exception:
         try:
             await action(Remote.connect(session, account.url), account)
         except _REMOTE_ERRORS as error:
             LOGGER.warning("%s: %s", account.url, format_error(error))
-            last_error = error
-            continue
-        succeeded.append(account)
+            return error
+        return account
+
+    outcomes = await asyncio.gather(*(run_one(account) for account in accounts))
+    succeeded = [item for item in outcomes if isinstance(item, Account)]
     if not succeeded:
-        if last_error is None:
+        errors = [item for item in outcomes if isinstance(item, Exception)]
+        if not errors:
             message = "no active archive: login first"
             raise EvError(message)
-        raise EvError(format_error(last_error)) from last_error
+        raise EvError(format_error(errors[-1])) from errors[-1]
     return succeeded
 
 
