@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from evclient import main
+from evclient.cli import main
 from tests.conftest import RunningServer, free_port
 
 if TYPE_CHECKING:

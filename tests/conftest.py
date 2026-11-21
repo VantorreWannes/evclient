@@ -53,7 +53,7 @@ def start_server(
         server_dir = tmp_path / name
         server_dir.mkdir(parents=True, exist_ok=True)
         resolved_port = free_port() if port is None else port
-        process = subprocess.Popen(  # noqa: S603
+        process = subprocess.Popen(
             [
                 sys.executable,
                 "-m",

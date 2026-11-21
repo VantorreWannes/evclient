@@ -377,7 +377,7 @@ dev = [
 
 [[package]]
 name = "evserver"
-version = "0.3.1"
+version = "0.4.0"
 source = { editable = "../evserver" }
 dependencies = [
     { name = "aiofiles" },

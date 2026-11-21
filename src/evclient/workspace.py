@@ -1,90 +1,115 @@
-import logging
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from pathlib import Path
+from uuid import uuid4
+
+from pydantic import TypeAdapter
 
 from evclient.types import (
-    Archive,
+    Content,
     EvError,
-    LocalWorkspace,
-    decode_json,
-    encode_json,
-    new_workspace_identifier,
+    Manifest,
+    Reference,
+    SnapshotId,
+    UserId,
+    WorkspaceId,
 )
 
-if TYPE_CHECKING:
-    from pathlib import Path
 
-LOGGER = logging.getLogger("evclient.workspace")
-
-CONFIG_DIR = ".ev"
-ARCHIVES_FILE = "archives"
-WORKSPACE_FILE = "workspace.json"
+@dataclass(frozen=True, slots=True)
+class Account:
+    url: str
+    user_id: UserId
 
 
-def _config(workspace_path: Path, name: str) -> Path:
-    return workspace_path / CONFIG_DIR / name
+@dataclass(frozen=True, slots=True)
+class WorkspaceState:
+    identifier: WorkspaceId
+    snapshots: tuple[SnapshotId, ...] = ()
 
 
-def read_archives(workspace_path: Path) -> list[Archive]:
-    path = _config(workspace_path, ARCHIVES_FILE)
+@dataclass(frozen=True, slots=True)
+class CollectedManifest:
+    manifest: Manifest
+    references: tuple[Reference, ...]
+    contents: tuple[Content, ...]
+
+
+def _read_json[T](path: Path, model: type[T], default: T) -> T:
     if not path.exists():
-        LOGGER.debug("no %s for %s", ARCHIVES_FILE, workspace_path)
-        return []
-    archives = []
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
-        if not line.strip():
-            continue
-        try:
-            url, user_id = line.split()
-        except ValueError as error:
-            message = f"corrupt {ARCHIVES_FILE} line {number + 1}: {line!r}"
-            raise EvError(message) from error
-        archives.append(Archive(url=url, user_id=user_id))
-    LOGGER.debug("read %d archive(s) from %s", len(archives), path)
-    return archives
+        return default
+    try:
+        return TypeAdapter(model).validate_json(path.read_bytes())
+    except Exception as error:
+        message = f"malformed {path.name}: {error}"
+        raise EvError(message) from error
 
 
-def write_archives(workspace_path: Path, archives: list[Archive]) -> None:
-    path = _config(workspace_path, ARCHIVES_FILE)
+def _write_json[T](path: Path, model: type[T], value: T) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = "".join(f"{archive.url} {archive.user_id}\n" for archive in archives)
-    path.write_text(lines, encoding="utf-8")
-    LOGGER.debug("wrote %d archive(s) to %s", len(archives), path)
+    path.write_bytes(TypeAdapter(model).dump_json(value))
 
 
-def read_workspace(workspace_path: Path) -> LocalWorkspace:
-    path = _config(workspace_path, WORKSPACE_FILE)
-    if not path.exists():
-        LOGGER.debug("no %s for %s", WORKSPACE_FILE, workspace_path)
-        return LocalWorkspace(identifier=new_workspace_identifier())
-    return decode_json(LocalWorkspace, path.read_bytes())
+@dataclass(frozen=True, slots=True)
+class Workspace:
+    path: Path
 
+    def _config(self, name: str) -> Path:
+        return self.path / ".ev" / name
 
-def write_workspace(workspace_path: Path, workspace: LocalWorkspace) -> None:
-    path = _config(workspace_path, WORKSPACE_FILE)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(encode_json(workspace))
-    LOGGER.debug(
-        "wrote workspace (%d snapshot(s)) to %s", len(workspace.snapshots), path
-    )
+    def accounts(self) -> list[Account]:
+        return _read_json(self._config("accounts.json"), list[Account], [])
 
+    def login(self, account: Account) -> bool:
+        accounts = self.accounts()
+        if account in accounts:
+            return False
+        accounts.append(account)
+        _write_json(self._config("accounts.json"), list[Account], accounts)
+        return True
 
-def write_file(workspace_path: Path, relative_path: str, data: bytes) -> None:
-    path = workspace_path / relative_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
-    LOGGER.debug("materialized %s (%d bytes)", path, len(data))
+    def logout(self, account: Account) -> bool:
+        accounts = self.accounts()
+        if account not in accounts:
+            return False
+        accounts.remove(account)
+        _write_json(self._config("accounts.json"), list[Account], accounts)
+        return True
 
+    def state(self) -> WorkspaceState:
+        return _read_json(
+            self._config("workspace.json"),
+            WorkspaceState,
+            WorkspaceState(identifier=uuid4().hex),
+        )
 
-def _is_hidden(path: Path) -> bool:
-    return any(part.startswith(".") for part in path.parts)
+    def write_state(self, state: WorkspaceState) -> None:
+        _write_json(self._config("workspace.json"), WorkspaceState, state)
 
+    def collect_manifest(self) -> CollectedManifest:
+        entries = [
+            (
+                content := Content(data=entry.read_bytes()),
+                Reference(
+                    file_path=entry.relative_to(self.path),
+                    content_id=content.id,
+                ),
+            )
+            for entry in sorted(self.path.rglob("*"))
+            if entry.is_file()
+            and not any(
+                part.startswith(".") for part in entry.relative_to(self.path).parts
+            )
+        ]
+        contents = tuple(content for content, _ in entries)
+        references = tuple(reference for _, reference in entries)
+        manifest = Manifest(reference_ids={reference.id for reference in references})
+        return CollectedManifest(
+            manifest=manifest,
+            references=references,
+            contents=contents,
+        )
 
-def scan_files(workspace_path: Path) -> list[tuple[str, bytes]]:
-    files = [
-        (relative.as_posix(), path.read_bytes())
-        for path in sorted(workspace_path.rglob("*"))
-        if path.is_file()
-        and not _is_hidden(relative := path.relative_to(workspace_path))
-    ]
-    LOGGER.debug("scanned %s -> %d file(s)", workspace_path, len(files))
-    return files
+    def write_file(self, relative_path: Path, data: bytes) -> None:
+        target = self.path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)

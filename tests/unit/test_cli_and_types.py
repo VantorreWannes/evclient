@@ -8,14 +8,15 @@ from aiohttp import ClientConnectorError, ClientResponseError, RequestInfo
 from aiohttp.client_reqrep import ConnectionKey
 from yarl import URL
 
-from evclient import _archive_url, _note_suffix, build_parser
-from evclient.operations import (
-    _select_positions,
+from evclient.cli import _archive_url, _note_suffix, build_parser
+from evclient.commands import (
+    Remote,
+    _resolve_positions,
     format_error,
-    login_command,
-    logout_command,
+    login,
+    logout,
 )
-from evclient.types import EvError, normalize_url
+from evclient.types import EvError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,8 +41,16 @@ def test_cli_parser_commands() -> None:
         "alice",
     )
 
-    login = parser.parse_args(["workspace", ".", "login", "http://localhost", "alice"])
-    assert (login.command, login.action, login.path, login.archive, login.user) == (
+    login_args = parser.parse_args(
+        ["workspace", ".", "login", "http://localhost", "alice"]
+    )
+    assert (
+        login_args.command,
+        login_args.action,
+        login_args.path,
+        login_args.archive,
+        login_args.user,
+    ) == (
         "workspace",
         "login",
         ".",
@@ -49,8 +58,8 @@ def test_cli_parser_commands() -> None:
         "alice",
     )
 
-    save = parser.parse_args(["workspace", ".", "save", "-n", "initial"])
-    assert (save.command, save.action, save.path, save.note) == (
+    save_args = parser.parse_args(["workspace", ".", "save", "-n", "initial"])
+    assert (save_args.command, save_args.action, save_args.path, save_args.note) == (
         "workspace",
         "save",
         ".",
@@ -66,8 +75,14 @@ def test_cli_parser_commands() -> None:
         1,
     )
 
-    clone = parser.parse_args(["workspace", "src", "clone", "dst", "-v", "2"])
-    assert (clone.command, clone.action, clone.path, clone.target, clone.version) == (
+    clone_args = parser.parse_args(["workspace", "src", "clone", "dst", "-v", "2"])
+    assert (
+        clone_args.command,
+        clone_args.action,
+        clone_args.path,
+        clone_args.target,
+        clone_args.version,
+    ) == (
         "workspace",
         "clone",
         "src",
@@ -75,8 +90,13 @@ def test_cli_parser_commands() -> None:
         2,
     )
 
-    forget = parser.parse_args(["workspace", ".", "forget", "-a"])
-    assert (forget.command, forget.action, forget.path, forget.forget_all) == (
+    forget_args = parser.parse_args(["workspace", ".", "forget", "-a"])
+    assert (
+        forget_args.command,
+        forget_args.action,
+        forget_args.path,
+        forget_args.forget_all,
+    ) == (
         "workspace",
         "forget",
         ".",
@@ -85,7 +105,8 @@ def test_cli_parser_commands() -> None:
 
 
 def test_normalize_url_and_helpers() -> None:
-    assert normalize_url("http://127.0.0.1:8080///") == "http://127.0.0.1:8080"
+    remote = Remote.connect(MagicMock(), "http://127.0.0.1:8080///")
+    assert remote.base_url == "http://127.0.0.1:8080"
     assert _note_suffix(None) == ""
     assert _note_suffix("initial") == " -- initial"
     assert _archive_url("http://localhost:8080") == "http://localhost:8080"
@@ -95,14 +116,13 @@ def test_normalize_url_and_helpers() -> None:
 
 def test_select_positions() -> None:
     expected_count = 3
-    assert _select_positions(expected_count, None, "single") == [0, 1, 2]
-    assert _select_positions(expected_count, 2, "single") == [1]
-    assert _select_positions(expected_count, 2, "suffix") == [1, 2]
+    assert _resolve_positions(expected_count, None) == [0, 1, 2]
+    assert _resolve_positions(expected_count, 2) == [1]
 
     with pytest.raises(EvError, match="workspace has no versions"):
-        _select_positions(0, None, "single")
+        _resolve_positions(0, None)
     with pytest.raises(EvError, match="out of range"):
-        _select_positions(expected_count, 4, "single")
+        _resolve_positions(expected_count, 4)
 
 
 def test_format_error() -> None:
@@ -144,7 +164,7 @@ def test_format_error() -> None:
 def test_login_logout_idempotency(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     ws.mkdir()
-    login_command(ws, "http://127.0.0.1:8081", "alice")
-    login_command(ws, "http://127.0.0.1:8081", "alice")
-    assert logout_command(ws, "http://127.0.0.1:8081", "alice") is True
-    assert logout_command(ws, "http://127.0.0.1:8081", "alice") is False
+    login(ws, "http://127.0.0.1:8081", "alice")
+    login(ws, "http://127.0.0.1:8081", "alice")
+    assert logout(ws, "http://127.0.0.1:8081", "alice") is True
+    assert logout(ws, "http://127.0.0.1:8081", "alice") is False
