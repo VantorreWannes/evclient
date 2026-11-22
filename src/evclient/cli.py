@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging
+import shlex
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -18,8 +19,77 @@ from evclient.commands import (
 )
 from evclient.logger import Logger, LogLevel
 from evclient.types import EvError
+from evclient.workspace import Account, Workspace
 
 LOGGER = logging.getLogger("evclient")
+DEFAULT_ARCHIVE_URL = "https://easyversionarchive.com"
+
+
+def suggest_tokens(
+    raw: str,
+    accounts: list[Account],
+) -> list[str]:
+    trailing_space = raw.endswith(" ")
+    try:
+        tokens = shlex.split(raw)
+    except ValueError:
+        tokens = raw.split()
+    completed = tokens if trailing_space else tokens[:-1]
+    prefix = "" if trailing_space else (tokens[-1] if tokens else "")
+
+    urls = list(dict.fromkeys([DEFAULT_ARCHIVE_URL, *(a.url for a in accounts)]))
+    users = list(dict.fromkeys(a.user_id for a in accounts))
+
+    candidates: list[str] = []
+    if not completed:
+        candidates = ["workspace", "archive"]
+    elif completed[0] == "archive":
+        if len(completed) == 1:
+            candidates = urls
+        elif len(completed) == 2:
+            candidates = ["register", "unregister", "workspaces", "clone"]
+        elif len(completed) == 3 and completed[2] in {
+            "register",
+            "unregister",
+            "workspaces",
+            "clone",
+        }:
+            candidates = users
+        elif (
+            len(completed) >= 4
+            and completed[2] == "clone"
+            and "--version" not in completed
+            and "-v" not in completed
+        ):
+            candidates = ["--version"]
+    elif completed[0] == "workspace":
+        if len(completed) == 1:
+            candidates = ["."]
+        elif len(completed) == 2:
+            candidates = ["save", "list", "login", "logout", "clone", "forget"]
+        elif len(completed) == 3:
+            action = completed[2]
+            if action in {"login", "logout"}:
+                candidates = urls
+            elif action == "save":
+                candidates = ["--note"]
+            elif action in {"list", "clone"}:
+                candidates = ["--version"]
+            elif action == "forget":
+                candidates = ["--version", "--all"]
+        elif len(completed) == 4 and completed[2] in {"login", "logout"}:
+            candidates = users
+
+    return [item for item in candidates if item.startswith(prefix)]
+
+
+def _complete(line: str) -> None:
+    try:
+        accounts = Workspace(path=Path.cwd()).accounts()
+    except EvError:
+        accounts = []
+    for token in suggest_tokens(line, accounts):
+        print(token)
 
 
 def _note_suffix(note: str | None) -> str:
@@ -222,6 +292,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--all", "-a", dest="forget_all", action="store_true", help="All versions."
     )
 
+    complete_parser = subparsers.add_parser(
+        "complete", help="Print shell completion suggestions."
+    )
+    complete_parser.add_argument(
+        "line", nargs="?", default="", help="Current command line."
+    )
+
     return parser
 
 
@@ -233,6 +310,9 @@ def _log_level(verbosity: int) -> LogLevel:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.command == "complete":
+        _complete(args.line)
+        return
     Logger(_log_level(args.verbose)).configure()
     key = f"{args.command}/{args.action}"
     try:

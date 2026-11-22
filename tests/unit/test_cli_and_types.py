@@ -8,7 +8,7 @@ from aiohttp import ClientConnectorError, ClientResponseError, RequestInfo
 from aiohttp.client_reqrep import ConnectionKey
 from yarl import URL
 
-from evclient.cli import _archive_url, _note_suffix, build_parser
+from evclient.cli import _archive_url, _note_suffix, build_parser, suggest_tokens
 from evclient.commands import (
     Remote,
     _resolve_positions,
@@ -17,6 +17,7 @@ from evclient.commands import (
     logout,
 )
 from evclient.types import EvError
+from evclient.workspace import Account
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -140,6 +141,10 @@ def test_cli_parser_commands() -> None:
     )
 
 
+    comp = parser.parse_args(["complete", "workspace . "])
+    assert (comp.command, comp.line) == ("complete", "workspace . ")
+
+
 def test_normalize_url_and_helpers() -> None:
     remote = Remote.connect(MagicMock(), "http://127.0.0.1:8080///")
     assert remote.base_url == "http://127.0.0.1:8080"
@@ -204,3 +209,26 @@ def test_login_logout_idempotency(tmp_path: Path) -> None:
     login(ws, "http://127.0.0.1:8081", "alice")
     assert logout(ws, "http://127.0.0.1:8081", "alice") is True
     assert logout(ws, "http://127.0.0.1:8081", "alice") is False
+
+
+def test_suggest_tokens() -> None:
+    accounts = [Account(url="https://example.com", user_id="alice")]
+    assert suggest_tokens("", accounts) == ["workspace", "archive"]
+    assert suggest_tokens("wor", accounts) == ["workspace"]
+    assert suggest_tokens("workspace . ", accounts) == [
+        "save",
+        "list",
+        "login",
+        "logout",
+        "clone",
+        "forget",
+    ]
+    assert suggest_tokens("archive https://example.com ", accounts) == [
+        "register",
+        "unregister",
+        "workspaces",
+        "clone",
+    ]
+    assert suggest_tokens("archive https://example.com workspaces ", accounts) == [
+        "alice"
+    ]
