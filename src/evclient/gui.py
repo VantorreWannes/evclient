@@ -35,7 +35,9 @@ from evclient.commands import (
     SaveResult,
     VersionListing,
     clone,
+    clone_remote,
     forget,
+    list_remote_workspaces,
     list_versions,
     login,
     logout,
@@ -43,7 +45,7 @@ from evclient.commands import (
     save,
     unregister,
 )
-from evclient.types import EvError, UserId
+from evclient.types import EvError, UserId, WorkspaceId
 from evclient.workspace import Account, Workspace
 
 DEFAULT_ARCHIVE_URL = "https://easyversionarchive.com"
@@ -178,7 +180,7 @@ class AccountRegistry:
             return []
         try:
             return TypeAdapter(list[Account]).validate_json(self._path.read_bytes())
-        except (OSError, ValueError):
+        except OSError, ValueError:
             return []
 
     def save(self, accounts: list[Account]) -> None:
@@ -282,6 +284,7 @@ class AsyncRunner(QObject):
 
 class WorkspaceSidebar(QWidget):
     workspace_selected = Signal(object)
+    clone_remote_requested = Signal()
 
     def __init__(self, registry: WorkspaceRegistry) -> None:
         super().__init__()
@@ -307,6 +310,10 @@ class WorkspaceSidebar(QWidget):
         buttons.addWidget(add_button)
         buttons.addWidget(remove_button)
         layout.addLayout(buttons)
+
+        clone_remote_button = QPushButton("Clone from Archive...")
+        clone_remote_button.clicked.connect(self.clone_remote_requested.emit)
+        layout.addWidget(clone_remote_button)
 
         self._load_initial()
 
@@ -428,6 +435,162 @@ class AccountDialog(QDialog):
             QMessageBox.warning(self, "EasyVersion", "User ID is required for Login.")
             return
         self.mode = mode
+        self.accept()
+
+
+class CloneRemoteDialog(QDialog):
+    def __init__(
+        self,
+        parent: QWidget,
+        known_accounts: list[Account],
+        runner: AsyncRunner,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Clone from Archive")
+        self.setMinimumWidth(480)
+        self._known_accounts = known_accounts
+        self._runner = runner
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self._url_input = QLineEdit(DEFAULT_ARCHIVE_URL)
+        self._user_input = QLineEdit()
+
+        if self._known_accounts:
+            self._saved_combo = QComboBox()
+            self._saved_combo.addItem("Custom account...")
+            for account in self._known_accounts:
+                self._saved_combo.addItem(f"{account.user_id} @ {account.url}")
+            self._saved_combo.currentIndexChanged.connect(self._on_saved_selected)
+            form.addRow("Saved Account", self._saved_combo)
+
+        form.addRow("Archive URL", self._url_input)
+        form.addRow("User ID", self._user_input)
+
+        workspace_row = QHBoxLayout()
+        self._workspace_combo = QComboBox()
+        self._workspace_combo.setEditable(True)
+        fetch_button = QPushButton("Fetch")
+        fetch_button.clicked.connect(self._fetch_workspaces)
+        workspace_row.addWidget(self._workspace_combo, 1)
+        workspace_row.addWidget(fetch_button)
+        form.addRow("Workspace ID", workspace_row)
+
+        self._version_input = QLineEdit()
+        self._version_input.setPlaceholderText("Latest (or version number)")
+        form.addRow("Version", self._version_input)
+
+        target_row = QHBoxLayout()
+        self._target_input = QLineEdit()
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(self._browse_target)
+        target_row.addWidget(self._target_input, 1)
+        target_row.addWidget(browse_button)
+        form.addRow("Target Folder", target_row)
+
+        layout.addLayout(form)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        clone_button = QPushButton("Clone")
+        clone_button.setObjectName("primary")
+        clone_button.clicked.connect(self._on_accept)
+        buttons.addWidget(cancel_button)
+        buttons.addWidget(clone_button)
+        layout.addLayout(buttons)
+
+        if self._known_accounts:
+            self._saved_combo.setCurrentIndex(1)
+
+    def url(self) -> str:
+        return self._url_input.text().strip()
+
+    def user_id(self) -> UserId:
+        return self._user_input.text().strip()
+
+    def workspace_id(self) -> WorkspaceId:
+        return self._workspace_combo.currentText().strip()
+
+    def target_path(self) -> Path:
+        return Path(self._target_input.text().strip())
+
+    def version(self) -> int | None:
+        raw = self._version_input.text().strip()
+        if not raw:
+            return None
+        return int(raw)
+
+    def _on_saved_selected(self, index: int) -> None:
+        if index <= 0:
+            self._url_input.setText(DEFAULT_ARCHIVE_URL)
+            self._user_input.clear()
+            return
+        account = self._known_accounts[index - 1]
+        self._url_input.setText(account.url)
+        self._user_input.setText(account.user_id)
+
+    def _fetch_workspaces(self) -> None:
+        url = self.url()
+        user_id = self.user_id()
+        if not url or not user_id:
+            QMessageBox.warning(
+                self, "EasyVersion", "Archive URL and User ID are required."
+            )
+            return
+
+        def on_loaded(workspace_ids: tuple[WorkspaceId, ...]) -> None:
+            self._workspace_combo.clear()
+            self._workspace_combo.addItems(list(workspace_ids))
+            if not workspace_ids:
+                QMessageBox.information(
+                    self, "EasyVersion", "No workspaces found for this user."
+                )
+
+        def on_error(error: EvError) -> None:
+            QMessageBox.critical(self, "EasyVersion", str(error))
+
+        self._runner.run(
+            lambda: list_remote_workspaces(url, user_id),
+            on_loaded,
+            on_error=on_error,
+        )
+
+    def _browse_target(self) -> None:
+        suggested = self.workspace_id() or "cloned-workspace"
+        target, _ = QFileDialog.getSaveFileName(
+            self,
+            "Clone Workspace As",
+            str(Path.cwd() / suggested),
+        )
+        if target:
+            self._target_input.setText(target)
+
+    def _on_accept(self) -> None:
+        if (
+            not self.url()
+            or not self.user_id()
+            or not self.workspace_id()
+            or not self._target_input.text().strip()
+        ):
+            QMessageBox.warning(
+                self,
+                "EasyVersion",
+                "URL, User ID, Workspace ID, and Target Folder are required.",
+            )
+            return
+        raw_version = self._version_input.text().strip()
+        if raw_version:
+            try:
+                if int(raw_version) < 1:
+                    raise ValueError
+            except ValueError:
+                QMessageBox.warning(
+                    self, "EasyVersion", "Version must be a positive integer."
+                )
+                return
         self.accept()
 
 
@@ -650,6 +813,7 @@ class MainWindow(QMainWindow):
         splitter.setSizes([220, 700])
 
         self._sidebar.workspace_selected.connect(self._on_workspace_selected)
+        self._sidebar.clone_remote_requested.connect(self._clone_remote)
         self._versions_tab.save_requested.connect(self._save)
         self._versions_tab.refresh_requested.connect(lambda: self._refresh(quiet=False))
         self._versions_tab.clone_requested.connect(self._clone)
@@ -762,6 +926,28 @@ class MainWindow(QMainWindow):
 
         self._runner.run(lambda: clone(source_path, target_path, version), on_done)
 
+    def _clone_remote(self) -> None:
+        dialog = CloneRemoteDialog(self, self._account_registry.load(), self._runner)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        url = dialog.url()
+        user_id = dialog.user_id()
+        workspace_id = dialog.workspace_id()
+        target_path = dialog.target_path()
+        version = dialog.version()
+
+        def on_done(result: CloneResult) -> None:
+            self._account_registry.remember(result.account)
+            self._sidebar.add_workspace(target_path)
+            self.statusBar().showMessage(
+                f"Cloned {result.first}..{result.last} from {result.account.url} to {target_path}"
+            )
+
+        self._runner.run(
+            lambda: clone_remote(url, user_id, workspace_id, target_path, version),
+            on_done,
+        )
+
     def _forget_version(self, version: int) -> None:
         path = self._sidebar.current_path()
         if path is None:
@@ -818,9 +1004,7 @@ class MainWindow(QMainWindow):
             account = login(path, url, raw_user)
             self._account_registry.remember(account)
             self._on_workspace_selected(path)
-            self.statusBar().showMessage(
-                f"Logged in {account.user_id} @ {account.url}"
-            )
+            self.statusBar().showMessage(f"Logged in {account.user_id} @ {account.url}")
             return
 
         def on_registered(created_id: UserId) -> None:

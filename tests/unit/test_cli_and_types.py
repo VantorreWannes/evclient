@@ -41,6 +41,42 @@ def test_cli_parser_commands() -> None:
         "alice",
     )
 
+    workspaces_args = parser.parse_args(
+        ["archive", "http://localhost", "workspaces", "alice"]
+    )
+    assert (
+        workspaces_args.command,
+        workspaces_args.action,
+        workspaces_args.url,
+        workspaces_args.user,
+    ) == (
+        "archive",
+        "workspaces",
+        "http://localhost",
+        "alice",
+    )
+
+    archive_clone_args = parser.parse_args(
+        ["archive", "http://localhost", "clone", "alice", "w1", "dst", "-v", "2"]
+    )
+    assert (
+        archive_clone_args.command,
+        archive_clone_args.action,
+        archive_clone_args.url,
+        archive_clone_args.user,
+        archive_clone_args.workspace,
+        archive_clone_args.target,
+        archive_clone_args.version,
+    ) == (
+        "archive",
+        "clone",
+        "http://localhost",
+        "alice",
+        "w1",
+        "dst",
+        2,
+    )
+
     login_args = parser.parse_args(
         ["workspace", ".", "login", "http://localhost", "alice"]
     )

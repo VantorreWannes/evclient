@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha3_512
 from pathlib import Path
 
@@ -21,6 +21,7 @@ class EvError(Exception):
 @dataclass(frozen=True, slots=True)
 class User:
     id: UserId
+    workspace_ids: set[WorkspaceId] = field(default_factory=set)
 
 
 @pydantic_dataclass(
@@ -76,5 +77,5 @@ class Snapshot:
 
 @dataclass(frozen=True, slots=True)
 class RemoteWorkspace:
-    snapshot_ids: set[SnapshotId]
+    snapshot_ids: list[SnapshotId]
     id: WorkspaceId

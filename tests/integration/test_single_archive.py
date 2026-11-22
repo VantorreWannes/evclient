@@ -5,7 +5,9 @@ import pytest
 
 from evclient.commands import (
     clone,
+    clone_remote,
     forget,
+    list_remote_workspaces,
     list_versions,
     login,
     logout,
@@ -127,5 +129,15 @@ def test_clone_versions(server_url: str, tmp_path: Path) -> None:
 
         with pytest.raises(EvError, match="target already exists"):
             await clone(workspace_dir, cloned_v1)
+
+        remote_workspaces = await list_remote_workspaces(server_url, "alice")
+        assert len(remote_workspaces) == 1
+        remote_target = tmp_path / "cloned_from_archive"
+        remote_cloned = await clone_remote(
+            server_url, "alice", remote_workspaces[0], remote_target, version=1
+        )
+        assert (remote_cloned.first, remote_cloned.last) == (1, 1)
+        assert (remote_target / "README.md").read_text(encoding="utf-8") == "v1"
+        assert not (remote_target / "other.txt").exists()
 
     asyncio.run(run())

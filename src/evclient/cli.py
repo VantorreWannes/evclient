@@ -6,7 +6,9 @@ from pathlib import Path
 
 from evclient.commands import (
     clone,
+    clone_remote,
     forget,
+    list_remote_workspaces,
     list_versions,
     login,
     logout,
@@ -39,6 +41,34 @@ async def _register(args: argparse.Namespace) -> None:
 async def _unregister(args: argparse.Namespace) -> None:
     await unregister(_archive_url(args.url), args.user)
     LOGGER.info("unregistered: %s %s", args.url, args.user)
+
+
+async def _workspaces(args: argparse.Namespace) -> None:
+    workspace_ids = await list_remote_workspaces(_archive_url(args.url), args.user)
+    for workspace_id in workspace_ids:
+        print(workspace_id)
+
+
+async def _archive_clone(args: argparse.Namespace) -> None:
+    result = await clone_remote(
+        _archive_url(args.url),
+        args.user,
+        args.workspace,
+        Path(args.target),
+        args.version,
+    )
+    span = (
+        f"versions {result.first}..{result.last}"
+        if result.first != result.last
+        else f"version {result.first}"
+    )
+    LOGGER.info(
+        "cloned %s from %s (%s) to %s",
+        span,
+        result.account.url,
+        args.workspace,
+        args.target,
+    )
 
 
 async def _login(args: argparse.Namespace) -> None:
@@ -95,6 +125,8 @@ type CommandHandler = Callable[[argparse.Namespace], Awaitable[None]]
 _COMMANDS: dict[str, CommandHandler] = {
     "archive/register": _register,
     "archive/unregister": _unregister,
+    "archive/workspaces": _workspaces,
+    "archive/clone": _archive_clone,
     "workspace/login": _login,
     "workspace/logout": _logout,
     "workspace/save": _save,
@@ -129,6 +161,21 @@ def build_parser() -> argparse.ArgumentParser:
         "unregister", help="Forget the user on the archive."
     )
     unregister_parser.add_argument("user", help="User ID.")
+
+    workspaces_parser = archive_subparsers.add_parser(
+        "workspaces", help="List workspaces for a user on the archive."
+    )
+    workspaces_parser.add_argument("user", help="User ID.")
+
+    archive_clone_parser = archive_subparsers.add_parser(
+        "clone", help="Clone a workspace from the archive."
+    )
+    archive_clone_parser.add_argument("user", help="User ID.")
+    archive_clone_parser.add_argument("workspace", help="Workspace ID.")
+    archive_clone_parser.add_argument("target", help="Target path, may not exist.")
+    archive_clone_parser.add_argument(
+        "--version", "-v", dest="version", type=int, default=None, help="Version."
+    )
 
     workspace_parser = subparsers.add_parser("workspace", help="Manage workspaces.")
     workspace_parser.add_argument("path", help="Workspace path.")

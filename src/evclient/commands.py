@@ -20,6 +20,7 @@ from evclient.types import (
     SnapshotId,
     User,
     UserId,
+    WorkspaceId,
 )
 from evclient.workspace import (
     Account,
@@ -117,16 +118,32 @@ class Remote:
 
     async def update_workspace(self, state: WorkspaceState) -> None:
         remote_workspace = RemoteWorkspace(
-            snapshot_ids=set(state.snapshots),
+            snapshot_ids=list(state.snapshots),
             id=state.identifier,
         )
         await self.workspace.set(remote_workspace.id, remote_workspace)
+
+    async def register_workspace(
+        self, user_id: UserId, workspace_id: WorkspaceId
+    ) -> None:
+        try:
+            user = await self.user.get(user_id)
+        except ClientResponseError as error:
+            if error.status != HTTPStatus.NOT_FOUND:
+                raise
+            user = User(id=user_id)
+        if workspace_id not in user.workspace_ids:
+            updated = User(
+                id=user.id, workspace_ids={*user.workspace_ids, workspace_id}
+            )
+            await self.user.set(user_id, updated)
 
     async def save_snapshot(
         self,
         collected: CollectedManifest,
         snapshot: Snapshot,
         state: WorkspaceState,
+        user_id: UserId,
     ) -> None:
         await asyncio.gather(
             *(self.content.set(item.id, item) for item in collected.contents),
@@ -134,7 +151,10 @@ class Remote:
         )
         await self.manifest.set(collected.manifest.id, collected.manifest)
         await self.snapshot.set(snapshot.id, snapshot)
-        await self.update_workspace(state)
+        await asyncio.gather(
+            self.update_workspace(state),
+            self.register_workspace(user_id, state.identifier),
+        )
 
     async def restore_snapshot(
         self, snapshot_id: SnapshotId
@@ -321,6 +341,17 @@ async def register(archive_url: str, user_id: UserId | None = None) -> UserId:
     return resolved_id
 
 
+async def list_remote_workspaces(
+    archive_url: str, user_id: UserId
+) -> tuple[WorkspaceId, ...]:
+    try:
+        async with aiohttp.ClientSession() as session:
+            user = await Remote.connect(session, archive_url).user.get(user_id)
+    except _REMOTE_ERRORS as error:
+        raise EvError(format_error(error)) from error
+    return tuple(sorted(user.workspace_ids))
+
+
 async def unregister(archive_url: str, user_id: UserId) -> None:
     try:
         async with aiohttp.ClientSession() as session:
@@ -354,7 +385,9 @@ async def save(workspace_path: Path, note: str | None = None) -> SaveResult:
         succeeded = await _try_all(
             session,
             accounts,
-            lambda remote, _: remote.save_snapshot(collected, snapshot, updated_state),
+            lambda remote, account: remote.save_snapshot(
+                collected, snapshot, updated_state, account.user_id
+            ),
         )
     workspace.write_state(updated_state)
     return SaveResult(
@@ -425,6 +458,47 @@ async def clone(
         target.login(item)
     target.write_state(
         WorkspaceState(identifier=uuid4().hex, snapshots=cloned_snapshots)
+    )
+    return CloneResult(account=account, first=first, last=last)
+
+
+async def clone_remote(
+    archive_url: str,
+    user_id: UserId,
+    workspace_id: WorkspaceId,
+    target_path: Path,
+    version: int | None = None,
+) -> CloneResult:
+    resolved_target = target_path.expanduser().resolve()
+    if resolved_target.exists():
+        message = f"target already exists: {target_path}"
+        raise EvError(message)
+    try:
+        async with aiohttp.ClientSession() as session:
+            remote = Remote.connect(session, archive_url)
+            remote_workspace = await remote.workspace.get(workspace_id)
+            snapshots = tuple(remote_workspace.snapshot_ids)
+            if not snapshots:
+                message = "remote workspace has no versions"
+                raise EvError(message)
+            if version is None:
+                target_position = len(snapshots) - 1
+                first, last = 1, len(snapshots)
+                cloned_snapshots = snapshots
+            else:
+                target_position = _resolve_position(len(snapshots), version)
+                first = last = target_position + 1
+                cloned_snapshots = snapshots[: target_position + 1]
+            restored = await remote.restore_snapshot(snapshots[target_position])
+    except _REMOTE_ERRORS as error:
+        raise EvError(format_error(error)) from error
+    target = Workspace(path=resolved_target)
+    for relative_path, data in restored:
+        target.write_file(relative_path, data)
+    account = Account(url=archive_url, user_id=user_id)
+    target.login(account)
+    target.write_state(
+        WorkspaceState(identifier=workspace_id, snapshots=cloned_snapshots)
     )
     return CloneResult(account=account, first=first, last=last)
 
