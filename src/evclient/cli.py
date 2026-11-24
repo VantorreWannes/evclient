@@ -317,11 +317,15 @@ def main() -> None:
         return
     Logger(_log_level(args.verbose)).configure()
     key = f"{args.command}/{args.action}"
+    LOGGER.debug("running command %s", key)
     try:
         asyncio.run(_COMMANDS[key](args))
     except EvError as error:
         LOGGER.error("%s", error)
         raise SystemExit(1) from error
+    except Exception as error:
+        LOGGER.critical("unexpected failure: %s", error)
+        raise
 
 
 if __name__ == "__main__":

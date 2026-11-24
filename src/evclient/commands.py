@@ -78,9 +78,7 @@ class Remote:
 
     @property
     def user(self) -> Archive[User]:
-        return Archive(
-            session=self.session, domain=f"{self.base_url}/user", model=User
-        )
+        return Archive(session=self.session, domain=f"{self.base_url}/user", model=User)
 
     @property
     def workspace(self) -> Archive[RemoteWorkspace]:
@@ -299,7 +297,11 @@ async def _try_first[T](
             last_error = error
     if last_error is None:
         message = "no active archive: login first"
+        LOGGER.error("%s", message)
         raise EvError(message)
+    LOGGER.error(
+        "all %d archive(s) failed: %s", len(accounts), format_error(last_error)
+    )
     raise EvError(format_error(last_error)) from last_error
 
 
@@ -322,13 +324,18 @@ async def _try_all(
         errors = [item for item in outcomes if isinstance(item, Exception)]
         if not errors:
             message = "no active archive: login first"
+            LOGGER.error("%s", message)
             raise EvError(message)
+        LOGGER.error(
+            "all %d archive(s) failed: %s", len(accounts), format_error(errors[-1])
+        )
         raise EvError(format_error(errors[-1])) from errors[-1]
     return succeeded
 
 
 async def register(archive_url: str, user_id: UserId | None = None) -> UserId:
     resolved_id = user_id if user_id is not None else uuid4().hex
+    LOGGER.debug("registering user %s on %s", resolved_id, archive_url)
     try:
         async with aiohttp.ClientSession() as session:
             users = Remote.connect(session, archive_url).user
@@ -337,27 +344,40 @@ async def register(archive_url: str, user_id: UserId | None = None) -> UserId:
                 raise EvError(message)
             await users.set(resolved_id, User(id=resolved_id))
     except _REMOTE_ERRORS as error:
+        LOGGER.error("register failed on %s: %s", archive_url, format_error(error))
         raise EvError(format_error(error)) from error
+    LOGGER.info("registered user %s on %s", resolved_id, archive_url)
     return resolved_id
 
 
 async def list_remote_workspaces(
     archive_url: str, user_id: UserId
 ) -> tuple[WorkspaceId, ...]:
+    LOGGER.debug("listing workspaces for %s on %s", user_id, archive_url)
     try:
         async with aiohttp.ClientSession() as session:
             user = await Remote.connect(session, archive_url).user.get(user_id)
     except _REMOTE_ERRORS as error:
+        LOGGER.error("workspaces failed on %s: %s", archive_url, format_error(error))
         raise EvError(format_error(error)) from error
+    LOGGER.info(
+        "found %d workspace(s) for %s on %s",
+        len(user.workspace_ids),
+        user_id,
+        archive_url,
+    )
     return tuple(sorted(user.workspace_ids))
 
 
 async def unregister(archive_url: str, user_id: UserId) -> None:
+    LOGGER.debug("unregistering user %s on %s", user_id, archive_url)
     try:
         async with aiohttp.ClientSession() as session:
             await Remote.connect(session, archive_url).user.delete(user_id)
     except _REMOTE_ERRORS as error:
+        LOGGER.error("unregister failed on %s: %s", archive_url, format_error(error))
         raise EvError(format_error(error)) from error
+    LOGGER.info("unregistered user %s on %s", user_id, archive_url)
 
 
 def login(workspace_path: Path, archive_url: str, user_id: UserId) -> Account:
@@ -390,6 +410,12 @@ async def save(workspace_path: Path, note: str | None = None) -> SaveResult:
             ),
         )
     workspace.write_state(updated_state)
+    LOGGER.info(
+        "saved version %d (%s) to %d archive(s)",
+        len(updated_state.snapshots),
+        snapshot.id[:12],
+        len(succeeded),
+    )
     return SaveResult(
         account=succeeded[0],
         version=len(updated_state.snapshots),
@@ -421,6 +447,7 @@ async def list_versions(workspace_path: Path, version: int | None = None) -> Lis
         )
         for position, snapshot in zip(positions, snapshots, strict=True)
     )
+    LOGGER.info("listed %d version(s) from %s", len(listings), account.url)
     return ListResult(account=account, listings=listings)
 
 
@@ -499,6 +526,9 @@ async def clone_remote(
     target.login(account)
     target.write_state(
         WorkspaceState(identifier=workspace_id, snapshots=cloned_snapshots)
+    )
+    LOGGER.info(
+        "cloned versions %d..%d from %s to %s", first, last, archive_url, target_path
     )
     return CloneResult(account=account, first=first, last=last)
 
