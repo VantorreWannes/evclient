@@ -185,7 +185,9 @@ async def _clone(args: argparse.Namespace) -> None:
 
 async def _forget(args: argparse.Namespace) -> None:
     result = await forget(Path(args.path), args.version, forget_all=args.forget_all)
-    target = f"version {result.version}" if result.version is not None else "all versions"
+    target = (
+        f"version {result.version}" if result.version is not None else "all versions"
+    )
     for account in result.accounts:
         LOGGER.info("%s %s: forgot %s", account.url, account.user_id, target)
 
